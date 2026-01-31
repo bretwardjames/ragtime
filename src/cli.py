@@ -166,7 +166,7 @@ def get_remote_branches_with_ragtime(path: Path) -> list[str]:
 
 
 @click.group()
-@click.version_option(version="0.2.3")
+@click.version_option(version="0.2.4")
 def main():
     """Ragtime - semantic search over code and documentation."""
     pass
@@ -1175,6 +1175,586 @@ def daemon_status(path: Path):
         pid_file.unlink()
 
 
+# ============================================================================
+# Debug Commands
+# ============================================================================
+
+
+@main.group()
+def debug():
+    """Debug and verify the vector index."""
+    pass
+
+
+@debug.command("search")
+@click.argument("query")
+@click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
+@click.option("--limit", "-l", default=5, help="Max results")
+@click.option("--show-vectors", is_flag=True, help="Show vector statistics")
+def debug_search(query: str, path: Path, limit: int, show_vectors: bool):
+    """Debug a search query - show scores and ranking details."""
+    path = Path(path).resolve()
+    db = get_db(path)
+
+    results = db.search(query=query, limit=limit)
+
+    if not results:
+        click.echo("No results found.")
+        return
+
+    click.echo(f"\nQuery: \"{query}\"")
+    click.echo(f"{'─' * 60}")
+
+    for i, result in enumerate(results, 1):
+        meta = result["metadata"]
+        distance = result["distance"]
+        similarity = 1 - distance if distance else None
+
+        click.echo(f"\n[{i}] {meta.get('file', 'unknown')}")
+        click.echo(f"    Distance: {distance:.4f}")
+        click.echo(f"    Similarity: {similarity:.4f} ({similarity * 100:.1f}%)")
+        click.echo(f"    Namespace: {meta.get('namespace', '-')}")
+        click.echo(f"    Type: {meta.get('type', '-')}")
+
+        # Show content preview
+        preview = result["content"][:100].replace("\n", " ")
+        click.echo(f"    Preview: {preview}...")
+
+    if show_vectors:
+        click.echo(f"\n{'─' * 60}")
+        click.echo("Vector Statistics:")
+        click.echo(f"  Total indexed: {db.collection.count()}")
+        click.echo(f"  Embedding model: all-MiniLM-L6-v2 (ChromaDB default)")
+        click.echo(f"  Vector dimensions: 384")
+        click.echo(f"  Distance metric: cosine")
+
+
+@debug.command("similar")
+@click.argument("file_path", type=click.Path(exists=True))
+@click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
+@click.option("--limit", "-l", default=5, help="Max similar docs")
+def debug_similar(file_path: str, path: Path, limit: int):
+    """Find documents similar to a given file."""
+    path = Path(path).resolve()
+    db = get_db(path)
+
+    # Read the file content
+    try:
+        content = Path(file_path).read_text()
+    except Exception as e:
+        click.echo(f"✗ Could not read file: {e}", err=True)
+        return
+
+    # Use the content as the query
+    results = db.search(query=content, limit=limit + 1)  # +1 to exclude self
+
+    click.echo(f"\nDocuments similar to: {file_path}")
+    click.echo(f"{'─' * 60}")
+
+    shown = 0
+    for result in results:
+        # Skip the file itself
+        if result["metadata"].get("file", "").endswith(file_path):
+            continue
+
+        shown += 1
+        if shown > limit:
+            break
+
+        meta = result["metadata"]
+        distance = result["distance"]
+        similarity = 1 - distance if distance else None
+
+        click.echo(f"\n[{shown}] {meta.get('file', 'unknown')}")
+        click.echo(f"    Similarity: {similarity:.4f} ({similarity * 100:.1f}%)")
+
+        preview = result["content"][:100].replace("\n", " ")
+        click.echo(f"    Preview: {preview}...")
+
+
+@debug.command("stats")
+@click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
+@click.option("--by-namespace", is_flag=True, help="Show counts by namespace")
+@click.option("--by-type", is_flag=True, help="Show counts by type")
+def debug_stats(path: Path, by_namespace: bool, by_type: bool):
+    """Show detailed index statistics."""
+    path = Path(path).resolve()
+    db = get_db(path)
+
+    total = db.collection.count()
+    click.echo(f"\nIndex Statistics")
+    click.echo(f"{'─' * 40}")
+    click.echo(f"Total documents: {total}")
+
+    if total == 0:
+        click.echo("\nIndex is empty. Run 'ragtime index' first.")
+        return
+
+    # Get all documents for analysis
+    all_docs = db.collection.get()
+
+    if by_namespace or (not by_namespace and not by_type):
+        namespaces = {}
+        for meta in all_docs["metadatas"]:
+            ns = meta.get("namespace", "unknown")
+            namespaces[ns] = namespaces.get(ns, 0) + 1
+
+        click.echo(f"\nBy Namespace:")
+        for ns, count in sorted(namespaces.items(), key=lambda x: -x[1]):
+            pct = count / total * 100
+            click.echo(f"  {ns}: {count} ({pct:.1f}%)")
+
+    if by_type or (not by_namespace and not by_type):
+        types = {}
+        for meta in all_docs["metadatas"]:
+            t = meta.get("type", "unknown")
+            types[t] = types.get(t, 0) + 1
+
+        click.echo(f"\nBy Type:")
+        for t, count in sorted(types.items(), key=lambda x: -x[1]):
+            pct = count / total * 100
+            click.echo(f"  {t}: {count} ({pct:.1f}%)")
+
+
+@debug.command("verify")
+@click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
+def debug_verify(path: Path):
+    """Verify index integrity with test queries."""
+    path = Path(path).resolve()
+    db = get_db(path)
+
+    total = db.collection.count()
+    if total == 0:
+        click.echo("✗ Index is empty. Run 'ragtime index' first.")
+        return
+
+    click.echo(f"\nVerifying index ({total} documents)...")
+    click.echo(f"{'─' * 40}")
+
+    issues = []
+
+    # Test 1: Basic search works
+    click.echo("\n1. Testing basic search...")
+    try:
+        results = db.search("test", limit=1)
+        if results:
+            click.echo("   ✓ Search returns results")
+        else:
+            click.echo("   ⚠ Search returned no results (might be ok if no relevant docs)")
+    except Exception as e:
+        click.echo(f"   ✗ Search failed: {e}")
+        issues.append("Basic search failed")
+
+    # Test 2: Check for documents with missing metadata
+    click.echo("\n2. Checking metadata integrity...")
+    all_docs = db.collection.get()
+    missing_namespace = 0
+    missing_type = 0
+
+    for meta in all_docs["metadatas"]:
+        if not meta.get("namespace"):
+            missing_namespace += 1
+        if not meta.get("type"):
+            missing_type += 1
+
+    if missing_namespace:
+        click.echo(f"   ⚠ {missing_namespace} docs missing namespace")
+    else:
+        click.echo("   ✓ All docs have namespace")
+
+    if missing_type:
+        click.echo(f"   ⚠ {missing_type} docs missing type")
+    else:
+        click.echo("   ✓ All docs have type")
+
+    # Test 3: Check for duplicate IDs
+    click.echo("\n3. Checking for duplicates...")
+    ids = all_docs["ids"]
+    unique_ids = set(ids)
+    if len(ids) != len(unique_ids):
+        dup_count = len(ids) - len(unique_ids)
+        click.echo(f"   ✗ {dup_count} duplicate IDs found")
+        issues.append("Duplicate IDs")
+    else:
+        click.echo("   ✓ No duplicate IDs")
+
+    # Test 4: Similarity sanity check
+    click.echo("\n4. Testing similarity consistency...")
+    if total >= 2:
+        # Pick first doc and find similar
+        first_content = all_docs["documents"][0]
+        results = db.search(first_content[:500], limit=2)
+        if results and len(results) >= 1:
+            top_similarity = 1 - results[0]["distance"]
+            if top_similarity > 0.9:
+                click.echo(f"   ✓ Self-similarity check passed ({top_similarity:.2f})")
+            else:
+                click.echo(f"   ⚠ Self-similarity lower than expected ({top_similarity:.2f})")
+        else:
+            click.echo("   ⚠ Could not perform similarity check")
+    else:
+        click.echo("   - Skipped (need at least 2 docs)")
+
+    # Summary
+    click.echo(f"\n{'─' * 40}")
+    if issues:
+        click.echo(f"⚠ Found {len(issues)} issues:")
+        for issue in issues:
+            click.echo(f"  - {issue}")
+    else:
+        click.echo("✓ Index verification passed")
+
+
+# ============================================================================
+# Documentation Generation
+# ============================================================================
+
+
+@main.command()
+@click.argument("code_path", type=click.Path(exists=True, path_type=Path))
+@click.option("--output", "-o", type=click.Path(path_type=Path), default="docs/api",
+              help="Output directory for docs")
+@click.option("--stubs", is_flag=True, help="Generate stub docs with TODOs (no AI)")
+@click.option("--language", "-l", multiple=True,
+              help="Languages to document (python, typescript, javascript)")
+@click.option("--include-private", is_flag=True, help="Include private methods (_name)")
+def generate(code_path: Path, output: Path, stubs: bool, language: tuple, include_private: bool):
+    """Generate documentation from code.
+
+    Creates markdown documentation from code structure.
+
+    Examples:
+        ragtime generate src/ --stubs           # Create stub docs
+        ragtime generate src/ -o docs/api       # Specify output
+        ragtime generate src/ -l python         # Python only
+    """
+    import ast
+    import re as re_module
+
+    code_path = Path(code_path).resolve()
+    output = Path(output)
+
+    if not stubs:
+        click.echo("Use --stubs for stub generation, or /generate-docs for AI-powered docs")
+        click.echo("\nExample: ragtime generate src/ --stubs")
+        return
+
+    # Determine languages
+    if language:
+        languages = list(language)
+    else:
+        languages = ["python", "typescript", "javascript"]
+
+    # Map extensions to languages
+    ext_map = {
+        "python": [".py"],
+        "typescript": [".ts", ".tsx"],
+        "javascript": [".js", ".jsx"],
+    }
+
+    extensions = []
+    for lang in languages:
+        extensions.extend(ext_map.get(lang, []))
+
+    # Find code files
+    code_files = []
+    for ext in extensions:
+        code_files.extend(code_path.rglob(f"*{ext}"))
+
+    # Filter out common exclusions
+    exclude_patterns = ["__pycache__", "node_modules", ".venv", "venv", "dist", "build"]
+    code_files = [
+        f for f in code_files
+        if not any(ex in str(f) for ex in exclude_patterns)
+    ]
+
+    if not code_files:
+        click.echo(f"No code files found in {code_path}")
+        return
+
+    click.echo(f"Found {len(code_files)} code files")
+    click.echo(f"Output: {output}/")
+    click.echo(f"{'─' * 50}")
+
+    output.mkdir(parents=True, exist_ok=True)
+    generated = 0
+
+    for code_file in code_files:
+        try:
+            content = code_file.read_text()
+        except Exception:
+            continue
+
+        relative = code_file.relative_to(code_path)
+        doc_path = output / relative.with_suffix(".md")
+
+        # Parse based on extension
+        if code_file.suffix == ".py":
+            doc_content = generate_python_stub(code_file, content, include_private)
+        elif code_file.suffix in [".ts", ".tsx", ".js", ".jsx"]:
+            doc_content = generate_typescript_stub(code_file, content, include_private)
+        else:
+            continue
+
+        if doc_content:
+            doc_path.parent.mkdir(parents=True, exist_ok=True)
+            doc_path.write_text(doc_content)
+            try:
+                doc_display = doc_path.relative_to(Path.cwd())
+            except ValueError:
+                doc_display = doc_path
+            click.echo(f"  ✓ {relative} → {doc_display}")
+            generated += 1
+
+    click.echo(f"\n{'─' * 50}")
+    click.echo(f"✓ Generated {generated} documentation stubs")
+    click.echo(f"\nNext steps:")
+    click.echo(f"  1. Fill in the TODO placeholders")
+    click.echo(f"  2. Or use /generate-docs for AI-generated content")
+    click.echo(f"  3. Run 'ragtime index' to make searchable")
+
+
+def generate_python_stub(file_path: Path, content: str, include_private: bool) -> str:
+    """Generate markdown stub from Python code."""
+    import ast
+
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return ""
+
+    lines = []
+    lines.append(f"# {file_path.stem}")
+    lines.append(f"\n> **File:** `{file_path}`")
+    lines.append("\n## Overview\n")
+    lines.append("TODO: Describe what this module does.\n")
+
+    # Get module docstring
+    if ast.get_docstring(tree):
+        lines.append(f"> {ast.get_docstring(tree)}\n")
+
+    classes = []
+    functions = []
+
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.ClassDef):
+            if not include_private and node.name.startswith("_"):
+                continue
+            classes.append(node)
+        elif isinstance(node, ast.FunctionDef) or isinstance(node, ast.AsyncFunctionDef):
+            if not include_private and node.name.startswith("_"):
+                continue
+            functions.append(node)
+
+    # Document classes
+    if classes:
+        lines.append("---\n")
+        lines.append("## Classes\n")
+
+        for cls in classes:
+            lines.append(f"### `{cls.name}`\n")
+            if ast.get_docstring(cls):
+                lines.append(f"{ast.get_docstring(cls)}\n")
+            else:
+                lines.append("TODO: Describe this class.\n")
+
+            # Find __init__ and methods
+            methods = []
+            init_node = None
+            for item in cls.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if item.name == "__init__":
+                        init_node = item
+                    elif not item.name.startswith("_") or include_private:
+                        methods.append(item)
+
+            # Constructor
+            if init_node:
+                lines.append("#### Constructor\n")
+                sig = get_function_signature(init_node)
+                lines.append(f"```python\n{sig}\n```\n")
+                params = get_function_params(init_node)
+                if params:
+                    lines.append("| Parameter | Type | Default | Description |")
+                    lines.append("|-----------|------|---------|-------------|")
+                    for p in params:
+                        lines.append(f"| `{p['name']}` | `{p['type']}` | {p['default']} | TODO |")
+                    lines.append("")
+
+            # Methods
+            if methods:
+                lines.append("#### Methods\n")
+                for method in methods:
+                    async_prefix = "async " if isinstance(method, ast.AsyncFunctionDef) else ""
+                    ret = get_return_annotation(method)
+                    lines.append(f"##### `{async_prefix}{method.name}(...) -> {ret}`\n")
+                    if ast.get_docstring(method):
+                        lines.append(f"{ast.get_docstring(method)}\n")
+                    else:
+                        lines.append("TODO: Describe this method.\n")
+
+    # Document functions
+    if functions:
+        lines.append("---\n")
+        lines.append("## Functions\n")
+
+        for func in functions:
+            async_prefix = "async " if isinstance(func, ast.AsyncFunctionDef) else ""
+            ret = get_return_annotation(func)
+            lines.append(f"### `{async_prefix}{func.name}(...) -> {ret}`\n")
+            if ast.get_docstring(func):
+                lines.append(f"{ast.get_docstring(func)}\n")
+            else:
+                lines.append("TODO: Describe this function.\n")
+
+            params = get_function_params(func)
+            if params:
+                lines.append("**Parameters:**\n")
+                for p in params:
+                    lines.append(f"- `{p['name']}` (`{p['type']}`): TODO")
+                lines.append("")
+
+            lines.append(f"**Returns:** `{ret}` - TODO\n")
+
+    return "\n".join(lines)
+
+
+def get_function_signature(node) -> str:
+    """Get function signature string."""
+    import ast
+
+    args = []
+    for arg in node.args.args:
+        if arg.arg == "self":
+            continue
+        type_hint = ""
+        if arg.annotation:
+            type_hint = f": {ast.unparse(arg.annotation)}"
+        args.append(f"{arg.arg}{type_hint}")
+
+    return f"def {node.name}({', '.join(args)})"
+
+
+def get_function_params(node) -> list:
+    """Get function parameters with types and defaults."""
+    import ast
+
+    params = []
+    defaults = node.args.defaults
+    num_defaults = len(defaults)
+    num_args = len(node.args.args)
+
+    for i, arg in enumerate(node.args.args):
+        if arg.arg in ("self", "cls"):
+            continue
+
+        type_hint = "Any"
+        if arg.annotation:
+            try:
+                type_hint = ast.unparse(arg.annotation)
+            except:
+                type_hint = "Any"
+
+        default = "-"
+        default_idx = i - (num_args - num_defaults)
+        if default_idx >= 0 and default_idx < len(defaults):
+            try:
+                default = f"`{ast.unparse(defaults[default_idx])}`"
+            except:
+                default = "..."
+
+        params.append({
+            "name": arg.arg,
+            "type": type_hint,
+            "default": default,
+        })
+
+    return params
+
+
+def get_return_annotation(node) -> str:
+    """Get return type annotation."""
+    import ast
+
+    if node.returns:
+        try:
+            return ast.unparse(node.returns)
+        except:
+            return "Any"
+    return "None"
+
+
+def generate_typescript_stub(file_path: Path, content: str, include_private: bool) -> str:
+    """Generate markdown stub from TypeScript/JavaScript code."""
+    import re as re_module
+
+    lines = []
+    lines.append(f"# {file_path.stem}")
+    lines.append(f"\n> **File:** `{file_path}`")
+    lines.append("\n## Overview\n")
+    lines.append("TODO: Describe what this module does.\n")
+
+    # Find exports using regex
+    class_pattern = r'export\s+(?:default\s+)?class\s+(\w+)(?:\s+extends\s+(\w+))?'
+    func_pattern = r'export\s+(?:default\s+)?(?:async\s+)?function\s+(\w+)\s*\(([^)]*)\)(?:\s*:\s*([^\{]+))?'
+    const_pattern = r'export\s+const\s+(\w+)\s*(?::\s*([^=]+))?\s*='
+    interface_pattern = r'export\s+(?:default\s+)?interface\s+(\w+)'
+    type_pattern = r'export\s+type\s+(\w+)'
+
+    classes = re_module.findall(class_pattern, content)
+    functions = re_module.findall(func_pattern, content)
+    consts = re_module.findall(const_pattern, content)
+    interfaces = re_module.findall(interface_pattern, content)
+    types = re_module.findall(type_pattern, content)
+
+    # Interfaces and Types
+    if interfaces or types:
+        lines.append("---\n")
+        lines.append("## Types\n")
+        for iface in interfaces:
+            lines.append(f"### `interface {iface}`\n")
+            lines.append("TODO: Describe this interface.\n")
+        for t in types:
+            lines.append(f"### `type {t}`\n")
+            lines.append("TODO: Describe this type.\n")
+
+    # Classes
+    if classes:
+        lines.append("---\n")
+        lines.append("## Classes\n")
+        for cls_name, extends in classes:
+            lines.append(f"### `{cls_name}`")
+            if extends:
+                lines.append(f" extends `{extends}`")
+            lines.append("\n")
+            lines.append("TODO: Describe this class.\n")
+
+    # Functions
+    if functions:
+        lines.append("---\n")
+        lines.append("## Functions\n")
+        for func_name, params, return_type in functions:
+            ret = return_type.strip() if return_type else "void"
+            lines.append(f"### `{func_name}({params}) => {ret}`\n")
+            lines.append("TODO: Describe this function.\n")
+
+    # Constants
+    if consts:
+        lines.append("---\n")
+        lines.append("## Constants\n")
+        lines.append("| Name | Type | Description |")
+        lines.append("|------|------|-------------|")
+        for const_name, const_type in consts:
+            t = const_type.strip() if const_type else "unknown"
+            lines.append(f"| `{const_name}` | `{t}` | TODO |")
+        lines.append("")
+
+    if len(lines) <= 5:  # Only header
+        return ""
+
+    return "\n".join(lines)
+
+
 @main.command()
 @click.argument("docs_path", type=click.Path(exists=True, path_type=Path), default="docs")
 @click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
@@ -1370,7 +1950,7 @@ def update(check: bool):
     from urllib.request import urlopen
     from urllib.error import URLError
 
-    current = "0.2.3"
+    current = "0.2.4"
 
     click.echo(f"Current version: {current}")
     click.echo("Checking PyPI for updates...")

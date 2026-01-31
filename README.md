@@ -8,8 +8,10 @@ Local-first memory and RAG system for Claude Code. Semantic search over code, do
 - **Semantic Search**: Query memories and docs with natural language
 - **Cross-Branch Sync**: Share context with teammates before PRs merge
 - **Convention Checking**: Verify code follows team standards before PRs
+- **Doc Generation**: Generate documentation from code (stubs or AI-powered)
+- **Debug Tools**: Verify index integrity, inspect similarity scores
 - **MCP Server**: Native Claude Code integration
-- **Claude Commands**: Pre-built `/remember`, `/recall`, `/create-pr`, `/start` commands
+- **Claude Commands**: Pre-built `/remember`, `/recall`, `/create-pr`, `/generate-docs` commands
 - **ghp-cli Integration**: Auto-context when starting issues
 
 ## Installation
@@ -77,6 +79,41 @@ ragtime reindex
 ragtime audit docs/
 ragtime audit docs/ --fix    # Interactively add frontmatter
 ragtime audit docs/ --json   # Machine-readable output
+```
+
+### Documentation Generation
+
+```bash
+# Generate doc stubs from code
+ragtime generate src/ --stubs
+
+# Specify output location
+ragtime generate src/ --stubs -o docs/api
+
+# Python only
+ragtime generate src/ --stubs -l python
+
+# Include private methods
+ragtime generate src/ --stubs --include-private
+```
+
+### Debug & Verification
+
+```bash
+# Debug a search query (show similarity scores)
+ragtime debug search "authentication"
+ragtime debug search "auth" --show-vectors
+
+# Find similar documents
+ragtime debug similar docs/auth/jwt.md
+
+# Index statistics by namespace/type
+ragtime debug stats
+ragtime debug stats --by-namespace
+ragtime debug stats --by-type
+
+# Verify index integrity
+ragtime debug verify
 ```
 
 ### Cross-Branch Sync
@@ -212,6 +249,7 @@ After `ragtime install --workspace`:
 | `/handoff` | Save session context |
 | `/start` | Resume work on an issue |
 | `/create-pr` | Check conventions, graduate memories, create PR |
+| `/generate-docs` | AI-powered documentation generation from code |
 | `/import-docs` | Migrate existing docs to memories |
 | `/pr-graduate` | Curate branch knowledge (fallback if forgot before PR) |
 | `/audit` | Find duplicates/conflicts in memories |
