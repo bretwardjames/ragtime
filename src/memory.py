@@ -191,7 +191,12 @@ class MemoryStore:
             return None
 
         metadata = results["metadatas"][0]
-        file_path = self.memory_dir / metadata.get("file", "")
+        file_rel_path = metadata.get("file", "")
+
+        if not file_rel_path:
+            return None
+
+        file_path = self.memory_dir / file_rel_path
 
         if file_path.exists():
             return Memory.from_file(file_path)

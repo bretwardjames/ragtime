@@ -12,6 +12,7 @@ import sys
 from .db import RagtimeDB
 from .config import RagtimeConfig, init_config
 from .indexers.docs import index_directory as index_docs
+from .indexers.code import index_directory as index_code
 from .memory import Memory, MemoryStore
 
 
@@ -166,7 +167,7 @@ def get_remote_branches_with_ragtime(path: Path) -> list[str]:
 
 
 @click.group()
-@click.version_option(version="0.2.4")
+@click.version_option(version="0.2.5")
 def main():
     """Ragtime - semantic search over code and documentation."""
     pass
@@ -297,10 +298,41 @@ def index(path: Path, index_type: str, clear: bool):
             click.echo("  No documents found")
 
     if index_type in ("all", "code"):
+        # Build exclusion list for code
         code_exclude = list(config.code.exclude)
         for docs_path in config.docs.paths:
             code_exclude.append(f"**/{docs_path}/**")
-        click.echo("Code indexing not yet implemented")
+
+        total_entries = []
+        for code_path_str in config.code.paths:
+            code_root = path / code_path_str
+            if not code_root.exists():
+                click.echo(f"  Code path {code_root} not found, skipping...")
+                continue
+            click.echo(f"Indexing code in {code_root}...")
+            entries = index_code(
+                code_root,
+                languages=config.code.languages,
+                exclude=code_exclude,
+            )
+            total_entries.extend(entries)
+
+        if total_entries:
+            # Create unique IDs: file:line:symbol
+            ids = [f"{e.file_path}:{e.line_number}:{e.symbol_name}" for e in total_entries]
+            documents = [e.content for e in total_entries]
+            metadatas = [e.to_metadata() for e in total_entries]
+            db.upsert(ids=ids, documents=documents, metadatas=metadatas)
+            click.echo(f"  Indexed {len(total_entries)} code symbols")
+
+            # Show breakdown by type
+            by_type = {}
+            for e in total_entries:
+                by_type[e.symbol_type] = by_type.get(e.symbol_type, 0) + 1
+            breakdown = ", ".join(f"{count} {typ}s" for typ, count in sorted(by_type.items()))
+            click.echo(f"    ({breakdown})")
+        else:
+            click.echo("  No code symbols found")
 
     stats = db.stats()
     click.echo(f"\nIndex stats: {stats['total']} total ({stats['docs']} docs, {stats['code']} code)")
@@ -1041,7 +1073,15 @@ def daemon_start(path: Path, interval: str):
 
     Runs git fetch && ragtime sync on an interval to keep
     remote branches synced automatically.
+
+    Note: This command requires Unix (Linux/macOS). On Windows, use Task Scheduler instead.
     """
+    # Check for Windows - os.fork() is Unix-only
+    if sys.platform == "win32":
+        click.echo("✗ Daemon mode is not supported on Windows.", err=True)
+        click.echo("  Use Windows Task Scheduler to run 'ragtime sync' periodically instead.")
+        return
+
     path = Path(path).resolve()
     pid_file = get_pid_file(path)
     log_file = get_log_file(path)
@@ -1088,6 +1128,7 @@ def daemon_start(path: Path, interval: str):
     pid_file.write_text(str(os.getpid()))
 
     # Redirect output to log file
+    # Note: log_fd is intentionally kept open for the lifetime of the daemon
     log_fd = open(log_file, "a")
     os.dup2(log_fd.fileno(), sys.stdout.fileno())
     os.dup2(log_fd.fileno(), sys.stderr.fileno())
@@ -1652,7 +1693,7 @@ def get_function_params(node) -> list:
         if arg.annotation:
             try:
                 type_hint = ast.unparse(arg.annotation)
-            except:
+            except Exception:
                 type_hint = "Any"
 
         default = "-"
@@ -1660,7 +1701,7 @@ def get_function_params(node) -> list:
         if default_idx >= 0 and default_idx < len(defaults):
             try:
                 default = f"`{ast.unparse(defaults[default_idx])}`"
-            except:
+            except Exception:
                 default = "..."
 
         params.append({
@@ -1679,7 +1720,7 @@ def get_return_annotation(node) -> str:
     if node.returns:
         try:
             return ast.unparse(node.returns)
-        except:
+        except Exception:
             return "Any"
     return "None"
 
@@ -1803,7 +1844,7 @@ def audit(docs_path: Path, path: Path, fix: bool, as_json: bool):
                 parts = content.split("---", 2)
                 if len(parts) >= 3:
                     existing_meta = yaml.safe_load(parts[1]) or {}
-            except:
+            except Exception:
                 pass
 
         # Analyze file for suggestions
@@ -1950,7 +1991,7 @@ def update(check: bool):
     from urllib.request import urlopen
     from urllib.error import URLError
 
-    current = "0.2.4"
+    current = "0.2.5"
 
     click.echo(f"Current version: {current}")
     click.echo("Checking PyPI for updates...")

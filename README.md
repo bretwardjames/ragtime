@@ -5,7 +5,8 @@ Local-first memory and RAG system for Claude Code. Semantic search over code, do
 ## Features
 
 - **Memory Storage**: Store structured knowledge with namespaces, types, and metadata
-- **Semantic Search**: Query memories and docs with natural language
+- **Semantic Search**: Query memories, docs, and code with natural language
+- **Code Indexing**: Index functions, classes, and composables from Python, TypeScript, Vue, and Dart
 - **Cross-Branch Sync**: Share context with teammates before PRs merge
 - **Convention Checking**: Verify code follows team standards before PRs
 - **Doc Generation**: Generate documentation from code (stubs or AI-powered)
@@ -66,11 +67,26 @@ ragtime forget <memory-id>
 ### Search & Indexing
 
 ```bash
-# Index docs
+# Index everything (docs + code)
+ragtime index
+
+# Index only docs
 ragtime index --type docs
 
-# Semantic search
-ragtime search "how does auth work" --namespace app --limit 10
+# Index only code (functions, classes, composables)
+ragtime index --type code
+
+# Re-index with clear (removes old entries)
+ragtime index --clear
+
+# Semantic search across all content
+ragtime search "how does auth work" --limit 10
+
+# Search only code
+ragtime search "useAsyncState" --type code
+
+# Search only docs
+ragtime search "authentication" --type docs --namespace app
 
 # Reindex memory files
 ragtime reindex
@@ -190,11 +206,40 @@ docs:
 
 code:
   paths: ["."]
-  languages: ["python", "typescript", "dart"]
+  languages: ["python", "typescript", "javascript", "vue", "dart"]
+  exclude: ["**/node_modules/**", "**/build/**", "**/dist/**"]
 
 conventions:
   files: [".ragtime/CONVENTIONS.md"]
   also_search_memories: true
+```
+
+## Code Indexing
+
+The code indexer extracts meaningful symbols from your codebase:
+
+| Language | What Gets Indexed |
+|----------|-------------------|
+| Python | Classes, methods, functions (with docstrings) |
+| TypeScript/JS | Exported functions, classes, interfaces, types, constants |
+| Vue | Components, composable usage (useXxx calls) |
+| Dart | Classes, functions, mixins, extensions |
+
+Each symbol is indexed with:
+- **content**: The code snippet with signature and docstring
+- **file**: Full path to the source file
+- **line**: Line number for quick navigation
+- **symbol_name**: Searchable name (e.g., `useAsyncState`, `JWTManager.validate`)
+- **symbol_type**: `function`, `class`, `method`, `interface`, `composable`, etc.
+
+Example search results:
+```
+ragtime search "useAsyncState" --type code
+
+[1] /apps/web/components/agency/payers.vue
+    Type: code | Symbol: payers:useAsyncState
+    Score: 0.892
+    Uses composable: useAsyncState...
 ```
 
 ## Memory Format

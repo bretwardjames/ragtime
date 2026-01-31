@@ -26,7 +26,7 @@ class DocsConfig:
 class CodeConfig:
     """Configuration for code indexing."""
     paths: list[str] = field(default_factory=lambda: ["."])
-    languages: list[str] = field(default_factory=lambda: ["dart", "typescript", "python"])
+    languages: list[str] = field(default_factory=lambda: ["python", "typescript", "javascript", "vue", "dart"])
     exclude: list[str] = field(default_factory=lambda: [
         "**/node_modules/**",
         "**/.git/**",
