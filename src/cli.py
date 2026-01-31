@@ -11,8 +11,10 @@ import sys
 
 from .db import RagtimeDB
 from .config import RagtimeConfig, init_config
-from .indexers.docs import index_directory as index_docs
-from .indexers.code import index_directory as index_code
+from .indexers import (
+    discover_docs, index_doc_file, DocEntry,
+    discover_code_files, index_code_file, CodeEntry,
+)
 from .memory import Memory, MemoryStore
 
 
@@ -167,7 +169,7 @@ def get_remote_branches_with_ragtime(path: Path) -> list[str]:
 
 
 @click.group()
-@click.version_option(version="0.2.5")
+@click.version_option(version="0.2.6")
 def main():
     """Ragtime - semantic search over code and documentation."""
     pass
@@ -274,26 +276,43 @@ def index(path: Path, index_type: str, clear: bool):
             db.clear(type_filter=index_type)
 
     if index_type in ("all", "docs"):
-        total_entries = []
+        # Discover all doc files first
+        all_doc_files = []
         for docs_path in config.docs.paths:
             docs_root = path / docs_path
             if not docs_root.exists():
                 click.echo(f"  Docs path {docs_root} not found, skipping...")
                 continue
-            click.echo(f"Indexing docs in {docs_root}...")
-            entries = index_docs(
+            files = discover_docs(
                 docs_root,
                 patterns=config.docs.patterns,
                 exclude=config.docs.exclude,
             )
-            total_entries.extend(entries)
+            all_doc_files.extend(files)
 
-        if total_entries:
-            ids = [e.file_path for e in total_entries]
-            documents = [e.content for e in total_entries]
-            metadatas = [e.to_metadata() for e in total_entries]
-            db.upsert(ids=ids, documents=documents, metadatas=metadatas)
-            click.echo(f"  Indexed {len(total_entries)} documents")
+        if all_doc_files:
+            click.echo(f"Found {len(all_doc_files)} doc files")
+            total_entries = []
+            with click.progressbar(
+                all_doc_files,
+                label="  Processing",
+                show_percent=True,
+                show_pos=True,
+                item_show_func=lambda f: f.name[:30] if f else "",
+            ) as files:
+                for file_path in files:
+                    entry = index_doc_file(file_path)
+                    if entry:
+                        total_entries.append(entry)
+
+            if total_entries:
+                ids = [e.file_path for e in total_entries]
+                documents = [e.content for e in total_entries]
+                metadatas = [e.to_metadata() for e in total_entries]
+                db.upsert(ids=ids, documents=documents, metadatas=metadatas)
+                click.echo(f"  Indexed {len(total_entries)} documents")
+            else:
+                click.echo("  No valid documents found")
         else:
             click.echo("  No documents found")
 
@@ -303,36 +322,52 @@ def index(path: Path, index_type: str, clear: bool):
         for docs_path in config.docs.paths:
             code_exclude.append(f"**/{docs_path}/**")
 
-        total_entries = []
+        # Discover all code files first
+        all_code_files = []
         for code_path_str in config.code.paths:
             code_root = path / code_path_str
             if not code_root.exists():
                 click.echo(f"  Code path {code_root} not found, skipping...")
                 continue
-            click.echo(f"Indexing code in {code_root}...")
-            entries = index_code(
+            files = discover_code_files(
                 code_root,
                 languages=config.code.languages,
                 exclude=code_exclude,
             )
-            total_entries.extend(entries)
+            all_code_files.extend(files)
 
-        if total_entries:
-            # Create unique IDs: file:line:symbol
-            ids = [f"{e.file_path}:{e.line_number}:{e.symbol_name}" for e in total_entries]
-            documents = [e.content for e in total_entries]
-            metadatas = [e.to_metadata() for e in total_entries]
-            db.upsert(ids=ids, documents=documents, metadatas=metadatas)
-            click.echo(f"  Indexed {len(total_entries)} code symbols")
+        if all_code_files:
+            click.echo(f"Found {len(all_code_files)} code files")
+            total_entries = []
+            with click.progressbar(
+                all_code_files,
+                label="  Processing",
+                show_percent=True,
+                show_pos=True,
+                item_show_func=lambda f: f.name[:30] if f else "",
+            ) as files:
+                for file_path in files:
+                    file_entries = index_code_file(file_path)
+                    total_entries.extend(file_entries)
 
-            # Show breakdown by type
-            by_type = {}
-            for e in total_entries:
-                by_type[e.symbol_type] = by_type.get(e.symbol_type, 0) + 1
-            breakdown = ", ".join(f"{count} {typ}s" for typ, count in sorted(by_type.items()))
-            click.echo(f"    ({breakdown})")
+            if total_entries:
+                # Create unique IDs: file:line:symbol
+                ids = [f"{e.file_path}:{e.line_number}:{e.symbol_name}" for e in total_entries]
+                documents = [e.content for e in total_entries]
+                metadatas = [e.to_metadata() for e in total_entries]
+                db.upsert(ids=ids, documents=documents, metadatas=metadatas)
+                click.echo(f"  Indexed {len(total_entries)} code symbols")
+
+                # Show breakdown by type
+                by_type = {}
+                for e in total_entries:
+                    by_type[e.symbol_type] = by_type.get(e.symbol_type, 0) + 1
+                breakdown = ", ".join(f"{count} {typ}s" for typ, count in sorted(by_type.items()))
+                click.echo(f"    ({breakdown})")
+            else:
+                click.echo("  No code symbols found")
         else:
-            click.echo("  No code symbols found")
+            click.echo("  No code files found")
 
     stats = db.stats()
     click.echo(f"\nIndex stats: {stats['total']} total ({stats['docs']} docs, {stats['code']} code)")
@@ -1991,7 +2026,7 @@ def update(check: bool):
     from urllib.request import urlopen
     from urllib.error import URLError
 
-    current = "0.2.5"
+    current = "0.2.6"
 
     click.echo(f"Current version: {current}")
     click.echo("Checking PyPI for updates...")
