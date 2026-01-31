@@ -6,6 +6,7 @@ This allows searching for specific code constructs like "useAsyncState" or "JWTM
 """
 
 import ast
+import os
 import re
 from fnmatch import fnmatch
 from pathlib import Path
@@ -32,6 +33,7 @@ class CodeEntry:
     symbol_type: str       # function, class, interface, component, etc.
     line_number: int       # Line where symbol starts
     docstring: str | None = None  # Extracted docstring/JSDoc
+    mtime: float | None = None    # File modification time for incremental indexing
 
     def to_metadata(self) -> dict:
         """Convert to ChromaDB metadata dict."""
@@ -42,6 +44,7 @@ class CodeEntry:
             "symbol_name": self.symbol_name,
             "symbol_type": self.symbol_type,
             "line": self.line_number,
+            "mtime": self.mtime or 0.0,
         }
 
 
@@ -92,14 +95,21 @@ def discover_code_files(
                     rel_path = str(path)
 
                 for ex in exclude:
-                    # Handle ** patterns by checking if pattern appears in path
+                    # Handle ** patterns
                     if "**" in ex:
-                        # Convert glob to a simpler check: **/node_modules/** means
-                        # any path containing /node_modules/ segment
-                        core_pattern = ex.replace("**", "").strip("/")
-                        if core_pattern and f"/{core_pattern}/" in f"/{rel_path}/":
-                            skip = True
-                            break
+                        if ex.endswith("/**"):
+                            # Directory pattern: **/node_modules/** or **/generated/**
+                            # Extract the directory name to match as path segment
+                            dir_pattern = ex.replace("**/", "").replace("/**", "")
+                            if f"/{dir_pattern}/" in f"/{rel_path}/":
+                                skip = True
+                                break
+                        else:
+                            # File pattern: **/*.d.ts, **/*.test.*, **/*.generated.*
+                            file_pattern = ex.replace("**/", "")
+                            if fnmatch(path.name, file_pattern):
+                                skip = True
+                                break
                     elif fnmatch(rel_path, ex) or fnmatch(path.name, ex):
                         skip = True
                         break
@@ -432,7 +442,8 @@ def index_file(file_path: Path) -> list[CodeEntry]:
     """
     try:
         content = file_path.read_text(encoding='utf-8')
-    except (IOError, UnicodeDecodeError):
+        mtime = os.path.getmtime(file_path)
+    except (IOError, UnicodeDecodeError, OSError):
         return []
 
     # Skip empty files
@@ -442,15 +453,21 @@ def index_file(file_path: Path) -> list[CodeEntry]:
     suffix = file_path.suffix.lower()
 
     if suffix == ".py":
-        return index_python_file(file_path, content)
+        entries = index_python_file(file_path, content)
     elif suffix in [".ts", ".tsx", ".js", ".jsx"]:
-        return index_typescript_file(file_path, content)
+        entries = index_typescript_file(file_path, content)
     elif suffix == ".vue":
-        return index_vue_file(file_path, content)
+        entries = index_vue_file(file_path, content)
     elif suffix == ".dart":
-        return index_dart_file(file_path, content)
+        entries = index_dart_file(file_path, content)
+    else:
+        return []
 
-    return []
+    # Set mtime on all entries from this file
+    for entry in entries:
+        entry.mtime = mtime
+
+    return entries
 
 
 def index_directory(

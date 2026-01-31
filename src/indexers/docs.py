@@ -4,6 +4,7 @@ Docs indexer - parses markdown files with YAML frontmatter.
 Designed for .claude/memory/ style files but works with any markdown.
 """
 
+import os
 import re
 from pathlib import Path
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ class DocEntry:
     category: str | None = None
     component: str | None = None
     title: str | None = None
+    mtime: float | None = None  # File modification time for incremental indexing
 
     def to_metadata(self) -> dict:
         """Convert to ChromaDB metadata dict."""
@@ -29,6 +31,7 @@ class DocEntry:
             "category": self.category or "",
             "component": self.component or "",
             "title": self.title or Path(self.file_path).stem,
+            "mtime": self.mtime or 0.0,
         }
 
 
@@ -61,7 +64,8 @@ def index_file(file_path: Path) -> DocEntry | None:
     """
     try:
         content = file_path.read_text(encoding='utf-8')
-    except (IOError, UnicodeDecodeError):
+        mtime = os.path.getmtime(file_path)
+    except (IOError, UnicodeDecodeError, OSError):
         return None
 
     metadata, body = parse_frontmatter(content)
@@ -77,6 +81,7 @@ def index_file(file_path: Path) -> DocEntry | None:
         category=metadata.get("category"),
         component=metadata.get("component"),
         title=metadata.get("title"),
+        mtime=mtime,
     )
 
 

@@ -169,7 +169,7 @@ def get_remote_branches_with_ragtime(path: Path) -> list[str]:
 
 
 @click.group()
-@click.version_option(version="0.2.6")
+@click.version_option(version="0.2.7")
 def main():
     """Ragtime - semantic search over code and documentation."""
     pass
@@ -258,12 +258,73 @@ Add your team's conventions above. Each rule should be:
         click.echo(f"  Install for enhanced workflow: npm install -g @bretwardjames/ghp-cli")
 
 
+# Batch size for ChromaDB upserts (embedding computation happens here)
+INDEX_BATCH_SIZE = 100
+
+
+def _upsert_entries(db, entries, entry_type: str = "docs", label: str = "  Embedding"):
+    """Upsert entries to ChromaDB in batches with progress bar."""
+    if not entries:
+        return
+
+    # Process in batches with progress feedback
+    batches = [entries[i:i + INDEX_BATCH_SIZE] for i in range(0, len(entries), INDEX_BATCH_SIZE)]
+
+    with click.progressbar(
+        batches,
+        label=label,
+        show_percent=True,
+        show_pos=True,
+        item_show_func=lambda b: f"{len(b)} items" if b else "",
+    ) as batch_iter:
+        for batch in batch_iter:
+            if entry_type == "code":
+                ids = [f"{e.file_path}:{e.line_number}:{e.symbol_name}" for e in batch]
+            else:
+                ids = [e.file_path for e in batch]
+
+            documents = [e.content for e in batch]
+            metadatas = [e.to_metadata() for e in batch]
+            db.upsert(ids=ids, documents=documents, metadatas=metadatas)
+
+
+def _get_files_to_process(
+    all_files: list[Path],
+    indexed_files: dict[str, float],
+) -> tuple[list[Path], list[str]]:
+    """
+    Compare files on disk with indexed files to determine what needs processing.
+
+    Returns:
+        (files_to_index, files_to_delete)
+    """
+    disk_files = {str(f): os.path.getmtime(f) for f in all_files}
+
+    to_index = []
+    for file_path in all_files:
+        path_str = str(file_path)
+        disk_mtime = disk_files[path_str]
+        indexed_mtime = indexed_files.get(path_str, 0.0)
+
+        # Index if new or modified (with 1-second tolerance for filesystem precision)
+        if disk_mtime > indexed_mtime + 1.0:
+            to_index.append(file_path)
+
+    # Find deleted files (in index but not on disk)
+    to_delete = [f for f in indexed_files.keys() if f not in disk_files]
+
+    return to_index, to_delete
+
+
 @main.command()
 @click.argument("path", type=click.Path(exists=True, path_type=Path), default=".")
 @click.option("--type", "index_type", type=click.Choice(["all", "docs", "code"]), default="all")
 @click.option("--clear", is_flag=True, help="Clear existing index before indexing")
 def index(path: Path, index_type: str, clear: bool):
-    """Index a project directory."""
+    """Index a project directory.
+
+    Without --clear, performs incremental indexing (only changed files).
+    """
     path = path.resolve()
     db = get_db(path)
     config = RagtimeConfig.load(path)
@@ -276,7 +337,10 @@ def index(path: Path, index_type: str, clear: bool):
             db.clear(type_filter=index_type)
 
     if index_type in ("all", "docs"):
-        # Discover all doc files first
+        # Get currently indexed docs
+        indexed_docs = {} if clear else db.get_indexed_files("docs")
+
+        # Discover all doc files
         all_doc_files = []
         for docs_path in config.docs.paths:
             docs_root = path / docs_path
@@ -290,39 +354,55 @@ def index(path: Path, index_type: str, clear: bool):
             )
             all_doc_files.extend(files)
 
-        if all_doc_files:
-            click.echo(f"Found {len(all_doc_files)} doc files")
-            total_entries = []
-            with click.progressbar(
-                all_doc_files,
-                label="  Processing",
-                show_percent=True,
-                show_pos=True,
-                item_show_func=lambda f: f.name[:30] if f else "",
-            ) as files:
-                for file_path in files:
-                    entry = index_doc_file(file_path)
-                    if entry:
-                        total_entries.append(entry)
+        if all_doc_files or indexed_docs:
+            # Determine what needs processing
+            to_index, to_delete = _get_files_to_process(all_doc_files, indexed_docs)
 
-            if total_entries:
-                ids = [e.file_path for e in total_entries]
-                documents = [e.content for e in total_entries]
-                metadatas = [e.to_metadata() for e in total_entries]
-                db.upsert(ids=ids, documents=documents, metadatas=metadatas)
-                click.echo(f"  Indexed {len(total_entries)} documents")
-            else:
-                click.echo("  No valid documents found")
+            click.echo(f"Found {len(all_doc_files)} doc files")
+            if not clear:
+                unchanged = len(all_doc_files) - len(to_index)
+                if unchanged > 0:
+                    click.echo(f"  {unchanged} unchanged, {len(to_index)} to index")
+                if to_delete:
+                    click.echo(f"  {len(to_delete)} to remove (deleted from disk)")
+
+            # Delete removed files
+            if to_delete:
+                db.delete_by_file(to_delete, "docs")
+
+            # Index new/changed files
+            if to_index:
+                entries = []
+                with click.progressbar(
+                    to_index,
+                    label="  Parsing",
+                    show_percent=True,
+                    show_pos=True,
+                    item_show_func=lambda f: f.name[:30] if f else "",
+                ) as files:
+                    for file_path in files:
+                        entry = index_doc_file(file_path)
+                        if entry:
+                            entries.append(entry)
+
+                if entries:
+                    _upsert_entries(db, entries, "docs")
+                    click.echo(f"  Indexed {len(entries)} documents")
+            elif not to_delete:
+                click.echo("  All docs up to date")
         else:
             click.echo("  No documents found")
 
     if index_type in ("all", "code"):
+        # Get currently indexed code files
+        indexed_code = {} if clear else db.get_indexed_files("code")
+
         # Build exclusion list for code
         code_exclude = list(config.code.exclude)
         for docs_path in config.docs.paths:
             code_exclude.append(f"**/{docs_path}/**")
 
-        # Discover all code files first
+        # Discover all code files
         all_code_files = []
         for code_path_str in config.code.paths:
             code_root = path / code_path_str
@@ -336,36 +416,47 @@ def index(path: Path, index_type: str, clear: bool):
             )
             all_code_files.extend(files)
 
-        if all_code_files:
+        if all_code_files or indexed_code:
+            # Determine what needs processing
+            to_index, to_delete = _get_files_to_process(all_code_files, indexed_code)
+
             click.echo(f"Found {len(all_code_files)} code files")
-            total_entries = []
-            with click.progressbar(
-                all_code_files,
-                label="  Processing",
-                show_percent=True,
-                show_pos=True,
-                item_show_func=lambda f: f.name[:30] if f else "",
-            ) as files:
-                for file_path in files:
-                    file_entries = index_code_file(file_path)
-                    total_entries.extend(file_entries)
+            if not clear:
+                unchanged = len(all_code_files) - len(to_index)
+                if unchanged > 0:
+                    click.echo(f"  {unchanged} unchanged, {len(to_index)} to index")
+                if to_delete:
+                    click.echo(f"  {len(to_delete)} to remove (deleted from disk)")
 
-            if total_entries:
-                # Create unique IDs: file:line:symbol
-                ids = [f"{e.file_path}:{e.line_number}:{e.symbol_name}" for e in total_entries]
-                documents = [e.content for e in total_entries]
-                metadatas = [e.to_metadata() for e in total_entries]
-                db.upsert(ids=ids, documents=documents, metadatas=metadatas)
-                click.echo(f"  Indexed {len(total_entries)} code symbols")
+            # Delete removed files
+            if to_delete:
+                db.delete_by_file(to_delete, "code")
 
-                # Show breakdown by type
+            # Index new/changed files
+            if to_index:
+                entries = []
                 by_type = {}
-                for e in total_entries:
-                    by_type[e.symbol_type] = by_type.get(e.symbol_type, 0) + 1
-                breakdown = ", ".join(f"{count} {typ}s" for typ, count in sorted(by_type.items()))
-                click.echo(f"    ({breakdown})")
-            else:
-                click.echo("  No code symbols found")
+                with click.progressbar(
+                    to_index,
+                    label="  Parsing",
+                    show_percent=True,
+                    show_pos=True,
+                    item_show_func=lambda f: f.name[:30] if f else "",
+                ) as files:
+                    for file_path in files:
+                        file_entries = index_code_file(file_path)
+                        for entry in file_entries:
+                            entries.append(entry)
+                            by_type[entry.symbol_type] = by_type.get(entry.symbol_type, 0) + 1
+
+                if entries:
+                    click.echo(f"  Found {len(entries)} symbols")
+                    _upsert_entries(db, entries, "code")
+                    click.echo(f"  Indexed {len(entries)} code symbols")
+                    breakdown = ", ".join(f"{count} {typ}s" for typ, count in sorted(by_type.items()))
+                    click.echo(f"    ({breakdown})")
+            elif not to_delete:
+                click.echo("  All code up to date")
         else:
             click.echo("  No code files found")
 
@@ -2026,7 +2117,7 @@ def update(check: bool):
     from urllib.request import urlopen
     from urllib.error import URLError
 
-    current = "0.2.6"
+    current = "0.2.7"
 
     click.echo(f"Current version: {current}")
     click.echo("Checking PyPI for updates...")

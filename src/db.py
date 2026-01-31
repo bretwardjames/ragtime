@@ -165,3 +165,54 @@ class RagtimeDB:
             "docs": docs_count,
             "code": code_count,
         }
+
+    def get_indexed_files(self, type_filter: str | None = None) -> dict[str, float]:
+        """
+        Get all indexed files and their modification times.
+
+        Args:
+            type_filter: "code" or "docs" (None = both)
+
+        Returns:
+            Dict mapping file paths to their indexed mtime
+        """
+        where = {"type": type_filter} if type_filter else None
+        results = self.collection.get(where=where, include=["metadatas"])
+
+        files: dict[str, float] = {}
+        for meta in results["metadatas"]:
+            file_path = meta.get("file", "")
+            mtime = meta.get("mtime", 0.0)
+            # For code files, multiple entries per file - keep max mtime
+            if file_path not in files or mtime > files[file_path]:
+                files[file_path] = mtime
+
+        return files
+
+    def delete_by_file(self, file_paths: list[str], type_filter: str | None = None) -> int:
+        """
+        Delete all entries for the given file paths.
+
+        Args:
+            file_paths: List of file paths to remove
+            type_filter: "code" or "docs" (None = both)
+
+        Returns:
+            Number of entries deleted
+        """
+        if not file_paths:
+            return 0
+
+        # Build where clause
+        where = {"file": {"$in": file_paths}}
+        if type_filter:
+            where = {"$and": [{"file": {"$in": file_paths}}, {"type": type_filter}]}
+
+        # Get IDs to delete
+        results = self.collection.get(where=where)
+        ids = results["ids"]
+
+        if ids:
+            self.collection.delete(ids=ids)
+
+        return len(ids)

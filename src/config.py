@@ -33,6 +33,18 @@ class CodeConfig:
         "**/build/**",
         "**/dist/**",
         "**/.dart_tool/**",
+        # Generated code (Prisma, GraphQL, OpenAPI, etc.)
+        "**/generated/**",
+        "**/*.generated.*",
+        "**/*.g.dart",
+        # TypeScript declaration files (often auto-generated)
+        "**/*.d.ts",
+        # Test files (usually not needed in search)
+        "**/__tests__/**",
+        "**/*.test.*",
+        "**/*.spec.*",
+        # Python init files (rarely have searchable content)
+        "**/__init__.py",
     ])
 
 
