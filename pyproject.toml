@@ -1,0 +1,56 @@
+[project]
+name = "ragtime-cli"
+version = "0.2.3"
+description = "Local-first memory and RAG system for Claude Code - semantic search over code, docs, and team knowledge"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    {name = "Bret Martineau", email = "bretwardjames@gmail.com"}
+]
+keywords = ["claude", "rag", "memory", "mcp", "ai", "llm", "semantic-search", "vector-database"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Documentation",
+    "Topic :: Text Processing :: Indexing",
+]
+dependencies = [
+    "chromadb>=0.4.0",
+    "pyyaml>=6.0",
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/bretwardjames/ragtime"
+Repository = "https://github.com/bretwardjames/ragtime"
+Issues = "https://github.com/bretwardjames/ragtime/issues"
+
+[project.scripts]
+ragtime = "src.cli:main"
+ragtime-mcp = "src.mcp_server:main"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.setuptools.package-data]
+"src.commands" = ["*.md"]
+
+[tool.ruff]
+line-length = 100
