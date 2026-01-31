@@ -154,17 +154,28 @@ class RagtimeDB:
 
     def stats(self) -> dict:
         """Get index statistics."""
-        count = self.collection.count()
+        try:
+            count = self.collection.count()
 
-        # Count by type
-        docs_count = len(self.collection.get(where={"type": "docs"})["ids"])
-        code_count = len(self.collection.get(where={"type": "code"})["ids"])
+            # Count by type - only retrieve IDs, not full documents
+            docs_result = self.collection.get(where={"type": "docs"}, include=[])
+            code_result = self.collection.get(where={"type": "code"}, include=[])
 
-        return {
-            "total": count,
-            "docs": docs_count,
-            "code": code_count,
-        }
+            docs_count = len(docs_result["ids"])
+            code_count = len(code_result["ids"])
+
+            return {
+                "total": count,
+                "docs": docs_count,
+                "code": code_count,
+            }
+        except Exception:
+            # Return zeros if collection is corrupted or unavailable
+            return {
+                "total": 0,
+                "docs": 0,
+                "code": 0,
+            }
 
     def get_indexed_files(self, type_filter: str | None = None) -> dict[str, float]:
         """

@@ -80,18 +80,23 @@ class Memory:
 
         if self.namespace == "app":
             if self.component:
-                return f"app/{self.component}/{self.id}-{slug}.md"
+                # Sanitize component to prevent path traversal
+                safe_component = self._slugify(self.component)
+                return f"app/{safe_component}/{self.id}-{slug}.md"
             return f"app/{self.id}-{slug}.md"
         elif self.namespace == "team":
             return f"team/{self.id}-{slug}.md"
         elif self.namespace.startswith("user-"):
-            username = self.namespace.replace("user-", "")
+            # Sanitize username to prevent path traversal
+            username = self._slugify(self.namespace.replace("user-", ""))
             return f"users/{username}/{self.id}-{slug}.md"
         elif self.namespace.startswith("branch-"):
             branch_slug = self._slugify(self.namespace.replace("branch-", ""))
             return f"branches/{branch_slug}/{self.id}-{slug}.md"
         else:
-            return f"other/{self.namespace}/{self.id}-{slug}.md"
+            # Sanitize namespace to prevent path traversal
+            safe_namespace = self._slugify(self.namespace)
+            return f"other/{safe_namespace}/{self.id}-{slug}.md"
 
     @staticmethod
     def _slugify(text: str) -> str:
@@ -376,9 +381,25 @@ class MemoryStore:
 
     def _cleanup_empty_dirs(self, dir_path: Path) -> None:
         """Remove empty directories up to memory_dir."""
-        while dir_path != self.memory_dir and dir_path.exists():
-            if not any(dir_path.iterdir()):
-                dir_path.rmdir()
-                dir_path = dir_path.parent
-            else:
-                break
+        # Resolve paths to handle symlinks and ensure we stay within bounds
+        try:
+            dir_path = dir_path.resolve()
+            memory_dir_resolved = self.memory_dir.resolve()
+        except OSError:
+            return  # Can't resolve paths, bail out safely
+
+        # Ensure dir_path is actually under memory_dir
+        try:
+            dir_path.relative_to(memory_dir_resolved)
+        except ValueError:
+            return  # dir_path is not under memory_dir, bail out
+
+        while dir_path != memory_dir_resolved and dir_path.exists():
+            try:
+                if not any(dir_path.iterdir()):
+                    dir_path.rmdir()
+                    dir_path = dir_path.parent.resolve()
+                else:
+                    break
+            except OSError:
+                break  # Permission error or other issue, stop cleanup

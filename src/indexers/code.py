@@ -249,22 +249,37 @@ def index_typescript_file(file_path: Path, content: str) -> list[CodeEntry]:
     entries = []
     lines = content.split("\n")
 
-    # Patterns for different constructs
+    # Patterns for different constructs (exported and non-exported)
     patterns = [
         # Exported functions
         (r'export\s+(?:default\s+)?(?:async\s+)?function\s+(\w+)\s*(?:<[^>]+>)?\s*\(([^)]*)\)(?:\s*:\s*([^\{]+))?',
          "function"),
+        # Non-exported functions (top-level, not inside class/object)
+        (r'^(?:async\s+)?function\s+(\w+)\s*(?:<[^>]+>)?\s*\(',
+         "function"),
         # Arrow function exports
         (r'export\s+const\s+(\w+)\s*(?::\s*[^=]+)?\s*=\s*(?:async\s+)?\([^)]*\)\s*(?::\s*[^=]+)?\s*=>',
+         "function"),
+        # Non-exported arrow functions (top-level const)
+        (r'^const\s+(\w+)\s*(?::\s*[^=]+)?\s*=\s*(?:async\s+)?\([^)]*\)\s*(?::\s*[^=]+)?\s*=>',
          "function"),
         # Class exports
         (r'export\s+(?:default\s+)?class\s+(\w+)(?:\s+extends\s+(\w+))?(?:\s+implements\s+([^{]+))?',
          "class"),
+        # Non-exported classes
+        (r'^class\s+(\w+)(?:\s+extends\s+(\w+))?(?:\s+implements\s+([^{]+))?',
+         "class"),
         # Interface exports
         (r'export\s+(?:default\s+)?interface\s+(\w+)(?:<[^>]+>)?(?:\s+extends\s+([^{]+))?',
          "interface"),
+        # Non-exported interfaces
+        (r'^interface\s+(\w+)(?:<[^>]+>)?(?:\s+extends\s+([^{]+))?',
+         "interface"),
         # Type exports
         (r'export\s+type\s+(\w+)(?:<[^>]+>)?\s*=',
+         "type"),
+        # Non-exported types
+        (r'^type\s+(\w+)(?:<[^>]+>)?\s*=',
          "type"),
         # Const exports (useful for config objects, composables, etc.)
         (r'export\s+const\s+(\w+)\s*(?::\s*([^=]+))?\s*=\s*(?!.*=>)',
@@ -390,8 +405,9 @@ def index_dart_file(file_path: Path, content: str) -> list[CodeEntry]:
         # Class definitions
         (r'(?:abstract\s+)?class\s+(\w+)(?:<[^>]+>)?(?:\s+extends\s+(\w+))?(?:\s+with\s+([^{]+))?(?:\s+implements\s+([^{]+))?',
          "class"),
-        # Function definitions
-        (r'(?:Future<[^>]+>|void|int|String|bool|double|dynamic|\w+)\s+(\w+)\s*(?:<[^>]+>)?\s*\(',
+        # Top-level function definitions - explicit return types to avoid matching variable declarations
+        # The re.match already anchors at start, \s* is prepended in loop
+        (r'(?:Future<[^>]+>|Stream<[^>]+>|void|int|String|bool|double|dynamic|List<[^>]+>|Map<[^>]+>|Set<[^>]+>)\s+(\w+)\s*(?:<[^>]+>)?\s*\(',
          "function"),
         # Mixins
         (r'mixin\s+(\w+)(?:\s+on\s+(\w+))?',

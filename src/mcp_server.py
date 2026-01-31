@@ -487,7 +487,7 @@ class RagtimeMCPServer:
                         "protocolVersion": "2024-11-05",
                         "serverInfo": {
                             "name": "ragtime",
-                            "version": "0.2.6",
+                            "version": "0.2.8",
                         },
                         "capabilities": {
                             "tools": {},
@@ -563,8 +563,18 @@ class RagtimeMCPServer:
                     sys.stdout.write(json.dumps(response) + "\n")
                     sys.stdout.flush()
 
-            except json.JSONDecodeError:
-                continue
+            except json.JSONDecodeError as e:
+                # Log error and send JSON-RPC error response
+                error_response = {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {
+                        "code": -32700,
+                        "message": f"Parse error: {e}",
+                    },
+                }
+                sys.stdout.write(json.dumps(error_response) + "\n")
+                sys.stdout.flush()
             except KeyboardInterrupt:
                 break
 

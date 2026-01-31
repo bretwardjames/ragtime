@@ -75,6 +75,7 @@ def check_ghp_installed() -> bool:
 
 def get_issue_from_ghp(issue_num: int, path: Path) -> dict | None:
     """Get issue details using ghp issue open."""
+    import json
     try:
         result = subprocess.run(
             ["ghp", "issue", "open", str(issue_num), "--json"],
@@ -84,15 +85,15 @@ def get_issue_from_ghp(issue_num: int, path: Path) -> dict | None:
             timeout=30,
         )
         if result.returncode == 0:
-            import json
             return json.loads(result.stdout)
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
         pass
     return None
 
 
 def get_issue_from_gh(issue_num: int, path: Path) -> dict | None:
     """Get issue details using gh CLI."""
+    import json
     try:
         result = subprocess.run(
             ["gh", "issue", "view", str(issue_num), "--json", "title,body,labels,number"],
@@ -102,9 +103,8 @@ def get_issue_from_gh(issue_num: int, path: Path) -> dict | None:
             timeout=30,
         )
         if result.returncode == 0:
-            import json
             return json.loads(result.stdout)
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
         pass
     return None
 
@@ -169,7 +169,7 @@ def get_remote_branches_with_ragtime(path: Path) -> list[str]:
 
 
 @click.group()
-@click.version_option(version="0.2.7")
+@click.version_option(version="0.2.8")
 def main():
     """Ragtime - semantic search over code and documentation."""
     pass
@@ -1254,7 +1254,6 @@ def daemon_start(path: Path, interval: str):
     pid_file.write_text(str(os.getpid()))
 
     # Redirect output to log file
-    # Note: log_fd is intentionally kept open for the lifetime of the daemon
     log_fd = open(log_file, "a")
     os.dup2(log_fd.fileno(), sys.stdout.fileno())
     os.dup2(log_fd.fileno(), sys.stderr.fileno())
@@ -1262,9 +1261,20 @@ def daemon_start(path: Path, interval: str):
     import time
     from datetime import datetime
 
+    # Set up signal handler for clean shutdown
+    running = True
+
+    def handle_shutdown(signum, frame):
+        nonlocal running
+        running = False
+        print(f"\n[{datetime.now().isoformat()}] Received signal {signum}, shutting down...")
+
+    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGINT, handle_shutdown)
+
     print(f"\n[{datetime.now().isoformat()}] Daemon started (interval: {interval})")
 
-    while True:
+    while running:
         try:
             print(f"[{datetime.now().isoformat()}] Running sync...")
 
@@ -1287,7 +1297,17 @@ def daemon_start(path: Path, interval: str):
         except Exception as e:
             print(f"[{datetime.now().isoformat()}] Error: {e}")
 
-        time.sleep(interval_seconds)
+        # Sleep in small increments to respond to signals faster
+        for _ in range(interval_seconds):
+            if not running:
+                break
+            time.sleep(1)
+
+    # Clean up
+    print(f"[{datetime.now().isoformat()}] Daemon stopped")
+    log_fd.close()
+    if pid_file.exists():
+        pid_file.unlink()
 
 
 @daemon.command("stop")
@@ -2117,7 +2137,7 @@ def update(check: bool):
     from urllib.request import urlopen
     from urllib.error import URLError
 
-    current = "0.2.7"
+    current = "0.2.8"
 
     click.echo(f"Current version: {current}")
     click.echo("Checking PyPI for updates...")
