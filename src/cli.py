@@ -3,6 +3,7 @@ Ragtime CLI - semantic search and memory storage.
 """
 
 from pathlib import Path
+import json
 import subprocess
 import click
 import os
@@ -168,17 +169,166 @@ def get_remote_branches_with_ragtime(path: Path) -> list[str]:
         return []
 
 
+def setup_mcp_server(project_path: Path, force: bool = False) -> bool:
+    """Offer to configure MCP server for Claude Code integration.
+
+    Args:
+        project_path: The project directory
+        force: If True, add MCP server without prompting
+
+    Returns True if MCP was configured, False otherwise.
+    """
+    mcp_config_path = project_path / ".mcp.json"
+
+    ragtime_config = {
+        "command": "ragtime-mcp",
+        "args": ["--path", "."]
+    }
+
+    if mcp_config_path.exists():
+        # Read file once
+        try:
+            existing = json.loads(mcp_config_path.read_text())
+        except (IOError, OSError) as e:
+            click.echo(f"\n✗ Could not read .mcp.json: {e}", err=True)
+            return False
+        except json.JSONDecodeError as e:
+            click.echo(f"\n! Warning: .mcp.json contains invalid JSON: {e}", err=True)
+            if not (force or click.confirm("? Overwrite with new config?", default=False)):
+                return False
+            existing = {}
+
+        # Check if ragtime is already configured
+        if "mcpServers" in existing and "ragtime" in existing.get("mcpServers", {}):
+            click.echo("\n✓ MCP server already configured in .mcp.json")
+            return True
+
+        # Add ragtime to existing config
+        if force or click.confirm("\n? Add ragtime MCP server to existing .mcp.json?", default=True):
+            try:
+                if "mcpServers" not in existing:
+                    existing["mcpServers"] = {}
+                existing["mcpServers"]["ragtime"] = ragtime_config
+                mcp_config_path.write_text(json.dumps(existing, indent=2) + "\n")
+                click.echo("\n✓ Added ragtime to .mcp.json")
+                return True
+            except IOError as e:
+                click.echo(f"\n✗ Failed to update .mcp.json: {e}", err=True)
+                return False
+    else:
+        # Create new config
+        if force or click.confirm("\n? Create .mcp.json to enable Claude Code MCP integration?", default=True):
+            mcp_config = {
+                "mcpServers": {
+                    "ragtime": ragtime_config
+                }
+            }
+            try:
+                mcp_config_path.write_text(json.dumps(mcp_config, indent=2) + "\n")
+                click.echo("\n✓ Created .mcp.json with ragtime server")
+                return True
+            except IOError as e:
+                click.echo(f"\n✗ Failed to create .mcp.json: {e}", err=True)
+                return False
+
+    return False
+
+
+def setup_mcp_global(force: bool = False) -> bool:
+    """Add ragtime MCP server to global Claude settings.
+
+    Args:
+        force: If True, add without prompting
+
+    Returns True if configured, False otherwise.
+    """
+    claude_dir = Path.home() / ".claude"
+    settings_path = claude_dir / "settings.json"
+
+    ragtime_config = {
+        "command": "ragtime-mcp",
+        "args": ["--path", "."]
+    }
+
+    # Ensure ~/.claude exists
+    try:
+        claude_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        click.echo(f"✗ Failed to create {claude_dir}: {e}", err=True)
+        return False
+
+    if settings_path.exists():
+        # Read file once
+        try:
+            existing = json.loads(settings_path.read_text())
+        except (IOError, OSError) as e:
+            click.echo(f"✗ Could not read ~/.claude/settings.json: {e}", err=True)
+            return False
+        except json.JSONDecodeError as e:
+            click.echo(f"! Warning: ~/.claude/settings.json contains invalid JSON: {e}", err=True)
+            if not (force or click.confirm("? Overwrite with new config?", default=False)):
+                return False
+            existing = {}
+
+        # Check if ragtime is already configured
+        if "mcpServers" in existing and "ragtime" in existing.get("mcpServers", {}):
+            click.echo("✓ MCP server already configured in ~/.claude/settings.json")
+            return True
+
+        # Add ragtime to existing config
+        if force or click.confirm("? Add ragtime MCP server to ~/.claude/settings.json?", default=True):
+            try:
+                if "mcpServers" not in existing:
+                    existing["mcpServers"] = {}
+                existing["mcpServers"]["ragtime"] = ragtime_config
+                settings_path.write_text(json.dumps(existing, indent=2) + "\n")
+                click.echo("✓ Added ragtime to ~/.claude/settings.json")
+                return True
+            except IOError as e:
+                click.echo(f"✗ Failed to update settings: {e}", err=True)
+                return False
+    else:
+        # Create new settings file
+        if force or click.confirm("? Create ~/.claude/settings.json with ragtime MCP server?", default=True):
+            settings = {
+                "mcpServers": {
+                    "ragtime": ragtime_config
+                }
+            }
+            try:
+                settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+                click.echo("✓ Created ~/.claude/settings.json with ragtime server")
+                return True
+            except IOError as e:
+                click.echo(f"✗ Failed to create settings: {e}", err=True)
+                return False
+
+    return False
+
+
 @click.group()
-@click.version_option(version="0.2.9")
-def main():
+@click.version_option(version="0.2.18")
+@click.option("-y", "--force-defaults", is_flag=True, help="Accept all defaults without prompting")
+@click.pass_context
+def main(ctx, force_defaults: bool):
     """Ragtime - semantic search over code and documentation."""
-    pass
+    ctx.ensure_object(dict)
+    ctx.obj["force_defaults"] = force_defaults
 
 
 @main.command()
-@click.argument("path", type=click.Path(exists=True, path_type=Path), default=".")
-def init(path: Path):
-    """Initialize ragtime config for a project."""
+@click.argument("path", type=click.Path(exists=True, path_type=Path), default=".", required=False)
+@click.option("-G", "--global", "global_install", is_flag=True, help="Add MCP server to ~/.claude/settings.json")
+@click.pass_context
+def init(ctx, path: Path, global_install: bool):
+    """Initialize ragtime config for a project, or globally with -G."""
+    force = (ctx.obj or {}).get("force_defaults", False)
+
+    # Global install: just add MCP to ~/.claude/settings.json
+    if global_install:
+        setup_mcp_global(force=force)
+        return
+
     path = path.resolve()
     config = init_config(path)
     click.echo(f"Created .ragtime/config.yaml with defaults:")
@@ -256,6 +406,9 @@ Add your team's conventions above. Each rule should be:
     else:
         click.echo(f"\n• ghp-cli not found")
         click.echo(f"  Install for enhanced workflow: npm install -g @bretwardjames/ghp-cli")
+
+    # Offer MCP server setup for Claude Code integration
+    setup_mcp_server(path, force=(ctx.obj or {}).get("force_defaults", False))
 
 
 # Batch size for ChromaDB upserts (embedding computation happens here)

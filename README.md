@@ -24,8 +24,14 @@ pip install ragtime-cli
 ## Quick Start
 
 ```bash
-# Initialize in your project
+# Initialize in your project (prompts to set up MCP server)
 ragtime init
+
+# Or skip prompts with -y
+ragtime -y init
+
+# Or just enable MCP globally (works in any project)
+ragtime init -G
 
 # Index your docs
 ragtime index
@@ -386,7 +392,17 @@ After `ragtime install --workspace`:
 
 ## MCP Server
 
-Add to your Claude config (`.mcp.json`):
+The MCP server is automatically configured during `ragtime init`. You can also set it up manually:
+
+```bash
+# Project-level: creates .mcp.json in current project
+ragtime init
+
+# Global: adds to ~/.claude/settings.json (works in any project)
+ragtime init -G
+```
+
+Or add manually to `.mcp.json`:
 
 ```json
 {
@@ -398,6 +414,8 @@ Add to your Claude config (`.mcp.json`):
   }
 }
 ```
+
+The MCP server automatically finds the project root (`.ragtime` directory) even when Claude is started from a subdirectory.
 
 Available tools:
 - `remember` - Store a memory

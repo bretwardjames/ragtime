@@ -16,6 +16,28 @@ from .memory import Memory, MemoryStore
 from .feedback import FeedbackStore, SearchFeedback
 
 
+def find_project_root(start_path: Path) -> Path:
+    """Walk up directory tree to find project root containing .ragtime.
+
+    Similar to how git finds .git directory from any subdirectory.
+
+    Args:
+        start_path: Starting directory to search from
+
+    Returns:
+        Project root path, or start_path if .ragtime not found
+    """
+    current = start_path.resolve()
+
+    while current != current.parent:  # Stop at filesystem root
+        if (current / ".ragtime").is_dir():
+            return current
+        current = current.parent
+
+    # Fallback to start path if .ragtime not found
+    return start_path.resolve()
+
+
 class RagtimeMCPServer:
     """MCP Server that exposes ragtime operations as tools."""
 
@@ -24,9 +46,10 @@ class RagtimeMCPServer:
         Initialize the MCP server.
 
         Args:
-            project_path: Root of the project (defaults to cwd)
+            project_path: Root of the project (defaults to cwd, walks up to find .ragtime)
         """
-        self.project_path = project_path or Path.cwd()
+        start_path = project_path or Path.cwd()
+        self.project_path = find_project_root(start_path)
         self._db = None
         self._store = None
         self._feedback = None
@@ -612,7 +635,7 @@ class RagtimeMCPServer:
                         "protocolVersion": "2024-11-05",
                         "serverInfo": {
                             "name": "ragtime",
-                            "version": "0.2.17",
+                            "version": "0.2.18",
                         },
                         "capabilities": {
                             "tools": {},
