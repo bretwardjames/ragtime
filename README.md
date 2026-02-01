@@ -233,9 +233,38 @@ This is intentional - embeddings work better on focused summaries than large cod
 
 For Claude/MCP usage: The search tool description instructs Claude to read returned file paths for full implementations before making code changes.
 
+### Smart Query Understanding
+
+Search automatically detects qualifiers in natural language:
+
+```bash
+# These are equivalent - qualifiers are auto-detected
+ragtime search "error handling in mobile app"
+ragtime search "error handling" -r mobile
+
+# Use --raw for literal/exact search
+ragtime search "mobile error handling" --raw
+```
+
+Auto-detected qualifiers include: mobile, web, desktop, ios, android, flutter, react, vue, dart, python, typescript, auth, api, database, frontend, backend, and more.
+
+### Tiered Search
+
+Use tiered search to prioritize curated knowledge over raw code:
+
+```bash
+# Via MCP
+search(query="authentication", tiered=True)
+```
+
+Tiered search returns results in priority order:
+1. **Memories** - Curated, high-signal knowledge
+2. **Documentation** - Indexed markdown files
+3. **Code** - Function signatures and symbols
+
 ### Hybrid Search
 
-Semantic search can lose qualifiers - "error handling in mobile app" might return web app results because "error handling" dominates the embedding. Use `require_terms` to ensure specific words appear:
+For explicit keyword filtering, use `require_terms`:
 
 ```bash
 # CLI
@@ -246,6 +275,29 @@ search(query="error handling", require_terms=["mobile", "dart"])
 ```
 
 This combines semantic similarity (finds conceptually related content) with keyword filtering (ensures qualifiers aren't ignored).
+
+### Hierarchical Doc Chunking
+
+Long markdown files are automatically chunked by headers for better search accuracy:
+
+- Each section becomes a separate searchable chunk
+- Parent headers are preserved as context in the embedding
+- Short docs (<500 chars) remain as single chunks
+- Section path is stored (e.g., "Installation > Configuration > Environment Variables")
+
+### Feedback Loop
+
+Search quality improves over time based on usage patterns:
+
+```bash
+# Record when a result is useful (via MCP)
+record_feedback(query="auth flow", result_file="src/auth.py", action="used")
+
+# View usage statistics
+feedback_stats()
+```
+
+Frequently-used files receive a boost in future search rankings.
 
 ## Code Indexing
 
@@ -349,13 +401,15 @@ Add to your Claude config (`.mcp.json`):
 
 Available tools:
 - `remember` - Store a memory
-- `search` - Semantic search
+- `search` - Semantic search (supports tiered mode and auto-extraction)
 - `list_memories` - List with filters
 - `get_memory` - Get by ID
 - `store_doc` - Store document verbatim
 - `forget` - Delete memory
 - `graduate` - Promote branch → app
 - `update_status` - Change memory status
+- `record_feedback` - Record when search results are used (improves future rankings)
+- `feedback_stats` - View search result usage patterns
 
 ## ghp-cli Integration
 
