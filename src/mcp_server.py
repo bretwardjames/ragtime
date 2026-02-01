@@ -132,13 +132,13 @@ class RagtimeMCPServer:
             },
             {
                 "name": "search",
-                "description": "Hybrid search over indexed code and docs (semantic + keyword). Returns function signatures, class definitions, and doc summaries with file paths and line numbers. IMPORTANT: Results are summaries only - use the Read tool on returned file paths to see full implementations before making code changes or decisions.",
+                "description": "Smart hybrid search over indexed code and docs. Auto-detects qualifiers like 'mobile', 'auth', 'dart' in your query and ensures they appear in results. Returns function signatures, class definitions, and doc summaries with file paths and line numbers. IMPORTANT: Results are summaries only - use the Read tool on returned file paths to see full implementations.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Natural language search query"
+                            "description": "Natural language search query. Qualifiers like 'in mobile', 'for auth', 'dart' are auto-detected and used for filtering."
                         },
                         "namespace": {
                             "type": "string",
@@ -155,7 +155,12 @@ class RagtimeMCPServer:
                         "require_terms": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Terms that MUST appear in results (case-insensitive). Use for scoped queries like 'error handling in mobile' with require_terms=['mobile'] to ensure the qualifier isn't lost in semantic search."
+                            "description": "Additional terms that MUST appear in results. Usually not needed since qualifiers are auto-detected from the query."
+                        },
+                        "auto_extract": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": "Auto-detect component qualifiers from query (default: true). Set to false for literal/raw search."
                         },
                         "limit": {
                             "type": "integer",
@@ -338,7 +343,7 @@ class RagtimeMCPServer:
         }
 
     def _search(self, args: dict) -> dict:
-        """Search indexed content with hybrid semantic + keyword matching."""
+        """Search indexed content with smart query understanding."""
         results = self.db.search(
             query=args["query"],
             limit=args.get("limit", 10),
@@ -346,6 +351,7 @@ class RagtimeMCPServer:
             type_filter=args.get("type"),
             component=args.get("component"),
             require_terms=args.get("require_terms"),
+            auto_extract=args.get("auto_extract", True),
         )
 
         return {
@@ -493,7 +499,7 @@ class RagtimeMCPServer:
                         "protocolVersion": "2024-11-05",
                         "serverInfo": {
                             "name": "ragtime",
-                            "version": "0.2.13",
+                            "version": "0.2.14",
                         },
                         "capabilities": {
                             "tools": {},

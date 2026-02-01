@@ -4,10 +4,72 @@ ChromaDB wrapper for ragtime.
 Handles storage and retrieval of indexed documents and code.
 """
 
+import re
 from pathlib import Path
 from typing import Any
 import chromadb
 from chromadb.config import Settings
+
+
+def extract_query_hints(query: str, known_components: list[str] | None = None) -> tuple[str, list[str]]:
+    """
+    Extract component/scope hints from a query for hybrid search.
+
+    Detects patterns like "X in mobile", "mobile X", "X for auth" and extracts
+    the qualifier to use as require_terms. This prevents qualifiers from being
+    diluted in semantic search.
+
+    Args:
+        query: The natural language search query
+        known_components: Optional list of known component names to detect
+
+    Returns:
+        (cleaned_query, extracted_terms) - query with hints removed, terms to require
+    """
+    # Default known components/scopes (common patterns)
+    default_components = [
+        # Platforms
+        "mobile", "web", "desktop", "ios", "android", "flutter", "react", "vue",
+        # Languages
+        "dart", "python", "typescript", "javascript", "ts", "js", "py",
+        # Common components
+        "auth", "authentication", "api", "database", "db", "ui", "frontend", "backend",
+        "server", "client", "admin", "user", "payment", "billing", "notification",
+        "email", "cache", "queue", "worker", "scheduler", "logging", "metrics",
+    ]
+
+    components = set(c.lower() for c in (known_components or default_components))
+    extracted = []
+    cleaned = query
+
+    # Pattern 1: "X in/for/on {component}" - extract component
+    patterns = [
+        r'\b(?:in|for|on|from|using|with)\s+(?:the\s+)?(\w+)\s*(?:app|code|module|service|codebase)?(?:\s|$)',
+        r'\b(\w+)\s+(?:app|code|module|service|codebase)\b',
+    ]
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, query, re.IGNORECASE):
+            word = match.group(1).lower()
+            if word in components:
+                extracted.append(word)
+                # Remove the matched phrase from query
+                cleaned = cleaned[:match.start()] + " " + cleaned[match.end():]
+
+    # Pattern 2: Check if any known component appears as standalone word
+    words = re.findall(r'\b\w+\b', query.lower())
+    for word in words:
+        if word in components and word not in extracted:
+            # Only extract if it looks like a qualifier (not the main subject)
+            # Heuristic: if query has other meaningful words, it's likely a qualifier
+            other_words = [w for w in words if w != word and len(w) > 3]
+            if len(other_words) >= 2:
+                extracted.append(word)
+
+    # Clean up extra whitespace
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+
+    return cleaned, list(set(extracted))
 
 
 class RagtimeDB:
@@ -85,6 +147,7 @@ class RagtimeDB:
         type_filter: str | None = None,
         namespace: str | None = None,
         require_terms: list[str] | None = None,
+        auto_extract: bool = True,
         **filters,
     ) -> list[dict]:
         """
@@ -98,11 +161,26 @@ class RagtimeDB:
             require_terms: List of terms that MUST appear in results (case-insensitive).
                           Use for scoped queries like "error handling in mobile" with
                           require_terms=["mobile"] to ensure "mobile" isn't ignored.
+            auto_extract: If True (default), automatically detect component qualifiers
+                         in the query and add them to require_terms. Set to False
+                         for raw/literal search.
             **filters: Additional metadata filters (None values are ignored)
 
         Returns:
             List of dicts with 'content', 'metadata', 'distance'
         """
+        # Auto-extract component hints from query if enabled
+        search_query = query
+        all_require_terms = list(require_terms) if require_terms else []
+
+        if auto_extract:
+            cleaned_query, extracted = extract_query_hints(query)
+            if extracted:
+                # Use cleaned query for embedding (removes noise)
+                search_query = cleaned_query
+                # Add extracted terms to require_terms
+                all_require_terms.extend(extracted)
+                all_require_terms = list(set(all_require_terms))  # dedupe
         # Build list of filter conditions, excluding None values
         conditions = []
 
@@ -126,10 +204,10 @@ class RagtimeDB:
             where = {"$and": conditions}
 
         # When using require_terms, fetch more results since we'll filter some out
-        fetch_limit = limit * 5 if require_terms else limit
+        fetch_limit = limit * 5 if all_require_terms else limit
 
         results = self.collection.query(
-            query_texts=[query],
+            query_texts=[search_query],
             n_results=fetch_limit,
             where=where,
         )
@@ -139,13 +217,13 @@ class RagtimeDB:
         if results["documents"] and results["documents"][0]:
             for i, doc in enumerate(results["documents"][0]):
                 # Hybrid filtering: ensure required terms appear
-                if require_terms:
+                if all_require_terms:
                     doc_lower = doc.lower()
                     # Also check file path in metadata for code/file matches
                     file_path = (results["metadatas"][0][i].get("file", "") or "").lower()
                     combined_text = f"{doc_lower} {file_path}"
 
-                    if not all(term.lower() in combined_text for term in require_terms):
+                    if not all(term.lower() in combined_text for term in all_require_terms):
                         continue
 
                 output.append({

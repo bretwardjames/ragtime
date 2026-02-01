@@ -470,17 +470,21 @@ def index(path: Path, index_type: str, clear: bool):
 @click.option("--type", "type_filter", type=click.Choice(["all", "docs", "code"]), default="all")
 @click.option("--namespace", "-n", help="Filter by namespace")
 @click.option("--require", "-r", "require_terms", multiple=True,
-              help="Terms that MUST appear in results (repeatable)")
+              help="Additional terms that MUST appear (usually auto-detected)")
+@click.option("--raw", is_flag=True, help="Disable auto-detection of qualifiers")
 @click.option("--include-archive", is_flag=True, help="Also search archived branches")
 @click.option("--limit", "-l", default=5, help="Max results")
 @click.option("--verbose", "-v", is_flag=True, help="Show full content")
 def search(query: str, path: Path, type_filter: str, namespace: str,
-           require_terms: tuple, include_archive: bool, limit: int, verbose: bool):
+           require_terms: tuple, raw: bool, include_archive: bool, limit: int, verbose: bool):
     """
-    Hybrid search: semantic similarity + keyword filtering.
+    Smart search: auto-detects qualifiers like 'mobile', 'auth', 'dart'.
 
-    Use --require/-r to ensure specific terms appear in results.
-    Example: ragtime search "error handling" -r mobile -r dart
+    \b
+    Examples:
+      ragtime search "error handling in mobile"  # auto-requires 'mobile'
+      ragtime search "auth flow"                 # auto-requires 'auth'
+      ragtime search "useAsyncState" --raw       # literal search, no extraction
     """
     path = Path(path).resolve()
     db = get_db(path)
@@ -493,6 +497,7 @@ def search(query: str, path: Path, type_filter: str, namespace: str,
         type_filter=type_arg,
         namespace=namespace,
         require_terms=list(require_terms) if require_terms else None,
+        auto_extract=not raw,
     )
 
     if not results:
