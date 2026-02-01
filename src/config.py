@@ -12,13 +12,14 @@ import yaml
 @dataclass
 class DocsConfig:
     """Configuration for docs indexing."""
-    paths: list[str] = field(default_factory=lambda: ["docs", ".ragtime"])
+    # Note: .ragtime/ is NOT included here - memories are indexed separately via 'reindex'
+    # to avoid duplicate entries (same file indexed as both doc and memory)
+    paths: list[str] = field(default_factory=lambda: ["docs"])
     patterns: list[str] = field(default_factory=lambda: ["**/*.md"])
     exclude: list[str] = field(default_factory=lambda: [
         "**/node_modules/**",
         "**/.git/**",
-        "**/.ragtime/index/**",
-        "**/.ragtime/branches/.*",  # Exclude synced (dot-prefixed) branches
+        "**/.ragtime/**",  # Memories indexed separately
     ])
 
 

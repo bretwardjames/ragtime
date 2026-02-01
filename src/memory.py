@@ -207,25 +207,41 @@ class MemoryStore:
 
     def get(self, memory_id: str) -> Optional[Memory]:
         """Get a memory by ID."""
-        # Search in ChromaDB to find the file
-        results = self.db.collection.get(ids=[memory_id])
+        # Search in ChromaDB to find the memory
+        results = self.db.collection.get(ids=[memory_id], include=["documents", "metadatas"])
 
         if not results["ids"]:
             return None
 
         metadata = results["metadatas"][0]
+        content = results["documents"][0] if results["documents"] else ""
         file_rel_path = metadata.get("file", "")
 
-        if not file_rel_path:
-            return None
+        # Try to read from file first (has full frontmatter data)
+        if file_rel_path:
+            file_path = self.memory_dir / file_rel_path
+            if file_path.exists():
+                return Memory.from_file(file_path, relative_to=self.memory_dir)
 
-        file_path = self.memory_dir / file_rel_path
-
-        if file_path.exists():
-            # Pass relative_to so the memory preserves its actual file path
-            return Memory.from_file(file_path, relative_to=self.memory_dir)
-
-        return None
+        # Fall back to constructing from ChromaDB data
+        # This handles cases where file path is wrong or file was deleted
+        return Memory(
+            id=memory_id,
+            content=content,
+            namespace=metadata.get("namespace", "unknown"),
+            type=metadata.get("type", "unknown"),
+            component=metadata.get("component"),
+            confidence=metadata.get("confidence", "medium"),
+            confidence_reason=metadata.get("confidence_reason"),
+            source=metadata.get("source", "unknown"),
+            status=metadata.get("status", "active"),
+            added=metadata.get("added", ""),
+            author=metadata.get("author"),
+            issue=metadata.get("issue"),
+            epic=metadata.get("epic"),
+            branch=metadata.get("branch"),
+            _file_path=file_rel_path,
+        )
 
     def delete(self, memory_id: str) -> bool:
         """Delete a memory by ID."""
@@ -322,10 +338,13 @@ class MemoryStore:
         if component:
             conditions.append({"component": component})
 
+        # Exclude docs/code entries - they use type="docs" or type="code"
+        # while memories use types like "architecture", "feature", etc.
+        # This is especially important for wildcard queries
+        conditions.append({"type": {"$nin": ["docs", "code"]}})
+
         # Build where clause with $and if multiple conditions
-        if len(conditions) == 0:
-            where = None
-        elif len(conditions) == 1:
+        if len(conditions) == 1:
             where = conditions[0]
         else:
             where = {"$and": conditions}

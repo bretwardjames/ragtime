@@ -91,6 +91,10 @@ ragtime search "useAsyncState" --type code
 # Search only docs
 ragtime search "authentication" --type docs --namespace app
 
+# Hybrid search: semantic + keyword filtering
+# Use -r/--require to ensure terms appear in results
+ragtime search "error handling" -r mobile -r dart
+
 # Reindex memory files
 ragtime reindex
 
@@ -203,9 +207,9 @@ ragtime setup-ghp
 
 ```yaml
 docs:
-  paths: ["docs", ".ragtime"]
+  paths: ["docs"]
   patterns: ["**/*.md"]
-  exclude: ["**/node_modules/**"]
+  exclude: ["**/node_modules/**", "**/.ragtime/**"]
 
 code:
   paths: ["."]
@@ -228,6 +232,20 @@ Search returns **summaries with locations**, not full code:
 This is intentional - embeddings work better on focused summaries than large code blocks. The search tells you *what exists and where*, then you read the file for details.
 
 For Claude/MCP usage: The search tool description instructs Claude to read returned file paths for full implementations before making code changes.
+
+### Hybrid Search
+
+Semantic search can lose qualifiers - "error handling in mobile app" might return web app results because "error handling" dominates the embedding. Use `require_terms` to ensure specific words appear:
+
+```bash
+# CLI
+ragtime search "error handling" -r mobile -r dart
+
+# MCP
+search(query="error handling", require_terms=["mobile", "dart"])
+```
+
+This combines semantic similarity (finds conceptually related content) with keyword filtering (ensures qualifiers aren't ignored).
 
 ## Code Indexing
 

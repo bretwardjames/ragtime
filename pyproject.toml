@@ -1,6 +1,6 @@
 [project]
 name = "ragtime-cli"
-version = "0.2.10"
+version = "0.2.11"
 description = "Local-first memory and RAG system for Claude Code - semantic search over code, docs, and team knowledge"
 readme = "README.md"
 license = "MIT"

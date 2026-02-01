@@ -132,7 +132,7 @@ class RagtimeMCPServer:
             },
             {
                 "name": "search",
-                "description": "Semantic search over indexed code and docs. Returns function signatures, class definitions, and doc summaries with file paths and line numbers. IMPORTANT: Results are summaries only - use the Read tool on returned file paths to see full implementations before making code changes or decisions.",
+                "description": "Hybrid search over indexed code and docs (semantic + keyword). Returns function signatures, class definitions, and doc summaries with file paths and line numbers. IMPORTANT: Results are summaries only - use the Read tool on returned file paths to see full implementations before making code changes or decisions.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -151,6 +151,11 @@ class RagtimeMCPServer:
                         "component": {
                             "type": "string",
                             "description": "Filter by component"
+                        },
+                        "require_terms": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Terms that MUST appear in results (case-insensitive). Use for scoped queries like 'error handling in mobile' with require_terms=['mobile'] to ensure the qualifier isn't lost in semantic search."
                         },
                         "limit": {
                             "type": "integer",
@@ -333,13 +338,14 @@ class RagtimeMCPServer:
         }
 
     def _search(self, args: dict) -> dict:
-        """Search indexed content."""
+        """Search indexed content with hybrid semantic + keyword matching."""
         results = self.db.search(
             query=args["query"],
             limit=args.get("limit", 10),
             namespace=args.get("namespace"),
             type_filter=args.get("type"),
             component=args.get("component"),
+            require_terms=args.get("require_terms"),
         )
 
         return {
@@ -487,7 +493,7 @@ class RagtimeMCPServer:
                         "protocolVersion": "2024-11-05",
                         "serverInfo": {
                             "name": "ragtime",
-                            "version": "0.2.10",
+                            "version": "0.2.11",
                         },
                         "capabilities": {
                             "tools": {},

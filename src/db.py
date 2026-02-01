@@ -84,16 +84,20 @@ class RagtimeDB:
         limit: int = 10,
         type_filter: str | None = None,
         namespace: str | None = None,
+        require_terms: list[str] | None = None,
         **filters,
     ) -> list[dict]:
         """
-        Semantic search over indexed content.
+        Hybrid search: semantic similarity + keyword filtering.
 
         Args:
             query: Natural language search query
             limit: Max results to return
             type_filter: "code" or "docs" (None = both)
             namespace: Filter by namespace (for docs)
+            require_terms: List of terms that MUST appear in results (case-insensitive).
+                          Use for scoped queries like "error handling in mobile" with
+                          require_terms=["mobile"] to ensure "mobile" isn't ignored.
             **filters: Additional metadata filters (None values are ignored)
 
         Returns:
@@ -121,9 +125,12 @@ class RagtimeDB:
         else:
             where = {"$and": conditions}
 
+        # When using require_terms, fetch more results since we'll filter some out
+        fetch_limit = limit * 5 if require_terms else limit
+
         results = self.collection.query(
             query_texts=[query],
-            n_results=limit,
+            n_results=fetch_limit,
             where=where,
         )
 
@@ -131,11 +138,25 @@ class RagtimeDB:
         output = []
         if results["documents"] and results["documents"][0]:
             for i, doc in enumerate(results["documents"][0]):
+                # Hybrid filtering: ensure required terms appear
+                if require_terms:
+                    doc_lower = doc.lower()
+                    # Also check file path in metadata for code/file matches
+                    file_path = (results["metadatas"][0][i].get("file", "") or "").lower()
+                    combined_text = f"{doc_lower} {file_path}"
+
+                    if not all(term.lower() in combined_text for term in require_terms):
+                        continue
+
                 output.append({
                     "content": doc,
                     "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
                     "distance": results["distances"][0][i] if results["distances"] else None,
                 })
+
+                # Stop once we have enough
+                if len(output) >= limit:
+                    break
 
         return output
 

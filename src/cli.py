@@ -469,12 +469,19 @@ def index(path: Path, index_type: str, clear: bool):
 @click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
 @click.option("--type", "type_filter", type=click.Choice(["all", "docs", "code"]), default="all")
 @click.option("--namespace", "-n", help="Filter by namespace")
+@click.option("--require", "-r", "require_terms", multiple=True,
+              help="Terms that MUST appear in results (repeatable)")
 @click.option("--include-archive", is_flag=True, help="Also search archived branches")
 @click.option("--limit", "-l", default=5, help="Max results")
 @click.option("--verbose", "-v", is_flag=True, help="Show full content")
 def search(query: str, path: Path, type_filter: str, namespace: str,
-           include_archive: bool, limit: int, verbose: bool):
-    """Search indexed content."""
+           require_terms: tuple, include_archive: bool, limit: int, verbose: bool):
+    """
+    Hybrid search: semantic similarity + keyword filtering.
+
+    Use --require/-r to ensure specific terms appear in results.
+    Example: ragtime search "error handling" -r mobile -r dart
+    """
     path = Path(path).resolve()
     db = get_db(path)
 
@@ -485,6 +492,7 @@ def search(query: str, path: Path, type_filter: str, namespace: str,
         limit=limit,
         type_filter=type_arg,
         namespace=namespace,
+        require_terms=list(require_terms) if require_terms else None,
     )
 
     if not results:
