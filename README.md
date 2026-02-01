@@ -70,13 +70,16 @@ ragtime forget <memory-id>
 # Index everything (docs + code)
 ragtime index
 
+# Incremental index (only changed files - fast!)
+ragtime index  # ~8 seconds vs ~5 minutes for unchanged codebases
+
 # Index only docs
 ragtime index --type docs
 
 # Index only code (functions, classes, composables)
 ragtime index --type code
 
-# Re-index with clear (removes old entries)
+# Full re-index (removes old entries, recomputes all embeddings)
 ragtime index --clear
 
 # Semantic search across all content
@@ -214,6 +217,18 @@ conventions:
   also_search_memories: true
 ```
 
+## How Search Works
+
+Search returns **summaries with locations**, not full code:
+
+1. **What you get**: Function signatures, docstrings, class definitions
+2. **What you don't get**: Full implementations
+3. **What to do**: Use the file path + line number to read the full code
+
+This is intentional - embeddings work better on focused summaries than large code blocks. The search tells you *what exists and where*, then you read the file for details.
+
+For Claude/MCP usage: The search tool description instructs Claude to read returned file paths for full implementations before making code changes.
+
 ## Code Indexing
 
 The code indexer extracts meaningful symbols from your codebase:
@@ -221,7 +236,7 @@ The code indexer extracts meaningful symbols from your codebase:
 | Language | What Gets Indexed |
 |----------|-------------------|
 | Python | Classes, methods, functions (with docstrings) |
-| TypeScript/JS | Exported functions, classes, interfaces, types, constants |
+| TypeScript/JS | Functions, classes, interfaces, types (exported and non-exported) |
 | Vue | Components, composable usage (useXxx calls) |
 | Dart | Classes, functions, mixins, extensions |
 
