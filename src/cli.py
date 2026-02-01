@@ -2215,8 +2215,12 @@ def update(check: bool):
     import json
     from urllib.request import urlopen
     from urllib.error import URLError
+    from importlib.metadata import version as get_version
 
-    current = "0.2.9"
+    try:
+        current = get_version("ragtime-cli")
+    except Exception:
+        current = "0.0.0"  # Fallback if not installed as package
 
     click.echo(f"Current version: {current}")
     click.echo("Checking PyPI for updates...")
