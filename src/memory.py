@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
 import uuid
+import hashlib
 import re
 import yaml
 
@@ -139,8 +140,19 @@ class Memory:
             except ValueError:
                 pass  # path not relative to base, will regenerate
 
+        # Use frontmatter ID if present, otherwise derive stable ID from file path
+        # This ensures reindex is idempotent - same file always gets same ID
+        if "id" in frontmatter:
+            memory_id = frontmatter["id"]
+        elif file_path:
+            # Stable hash of relative path
+            memory_id = hashlib.sha256(file_path.encode()).hexdigest()[:8]
+        else:
+            # Fallback: hash of absolute path
+            memory_id = hashlib.sha256(str(path).encode()).hexdigest()[:8]
+
         return cls(
-            id=frontmatter.get("id", str(uuid.uuid4())[:8]),
+            id=memory_id,
             content=content,
             namespace=frontmatter.get("namespace", "app"),
             type=frontmatter.get("type", "unknown"),

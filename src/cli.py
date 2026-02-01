@@ -734,6 +734,51 @@ def reindex(path: Path):
     click.echo(f"✓ Reindexed {count} memory files")
 
 
+@main.command()
+@click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
+@click.option("--dry-run", is_flag=True, help="Show duplicates without removing them")
+def dedupe(path: Path, dry_run: bool):
+    """Remove duplicate entries from the index.
+
+    Keeps one entry per unique file path, removing duplicates created
+    by older versions of reindex that generated random IDs.
+    """
+    path = Path(path).resolve()
+    db = get_db(path)
+
+    # Get all entries with their file paths
+    results = db.collection.get(include=["metadatas"])
+
+    # Group by file path
+    by_file: dict[str, list[str]] = {}
+    for i, mem_id in enumerate(results["ids"]):
+        file_path = results["metadatas"][i].get("file", "")
+        if file_path:
+            if file_path not in by_file:
+                by_file[file_path] = []
+            by_file[file_path].append(mem_id)
+
+    # Find duplicates
+    duplicates_to_remove = []
+    for file_path, ids in by_file.items():
+        if len(ids) > 1:
+            # Keep the first one, remove the rest
+            duplicates_to_remove.extend(ids[1:])
+            if dry_run:
+                click.echo(f"  {file_path}: {len(ids)} copies (would remove {len(ids) - 1})")
+
+    if not duplicates_to_remove:
+        click.echo("✓ No duplicates found")
+        return
+
+    if dry_run:
+        click.echo(f"\nWould remove {len(duplicates_to_remove)} duplicate entries")
+        click.echo("Run without --dry-run to remove them")
+    else:
+        db.delete(duplicates_to_remove)
+        click.echo(f"✓ Removed {len(duplicates_to_remove)} duplicate entries")
+
+
 @main.command("new-branch")
 @click.argument("issue", type=int)
 @click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
