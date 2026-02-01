@@ -281,7 +281,8 @@ def _upsert_entries(db, entries, entry_type: str = "docs", label: str = "  Embed
             if entry_type == "code":
                 ids = [f"{e.file_path}:{e.line_number}:{e.symbol_name}" for e in batch]
             else:
-                ids = [e.file_path for e in batch]
+                # Include chunk_index for hierarchical doc chunks
+                ids = [f"{e.file_path}:{e.chunk_index}" for e in batch]
 
             documents = [e.content for e in batch]
             metadatas = [e.to_metadata() for e in batch]

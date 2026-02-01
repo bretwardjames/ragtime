@@ -612,7 +612,7 @@ class RagtimeMCPServer:
                         "protocolVersion": "2024-11-05",
                         "serverInfo": {
                             "name": "ragtime",
-                            "version": "0.2.16",
+                            "version": "0.2.17",
                         },
                         "capabilities": {
                             "tools": {},
