@@ -94,26 +94,37 @@ class RagtimeDB:
             limit: Max results to return
             type_filter: "code" or "docs" (None = both)
             namespace: Filter by namespace (for docs)
-            **filters: Additional metadata filters
+            **filters: Additional metadata filters (None values are ignored)
 
         Returns:
             List of dicts with 'content', 'metadata', 'distance'
         """
-        where = {}
+        # Build list of filter conditions, excluding None values
+        conditions = []
 
         if type_filter:
-            where["type"] = type_filter
+            conditions.append({"type": type_filter})
 
         if namespace:
-            where["namespace"] = namespace
+            conditions.append({"namespace": namespace})
 
+        # Add any additional filters, but skip None values
         for key, value in filters.items():
-            where[key] = value
+            if value is not None:
+                conditions.append({key: value})
+
+        # ChromaDB requires $and for multiple conditions
+        if len(conditions) == 0:
+            where = None
+        elif len(conditions) == 1:
+            where = conditions[0]
+        else:
+            where = {"$and": conditions}
 
         results = self.collection.query(
             query_texts=[query],
             n_results=limit,
-            where=where if where else None,
+            where=where,
         )
 
         # Flatten results into list of dicts

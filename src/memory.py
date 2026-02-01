@@ -32,6 +32,8 @@ class Memory:
     epic: Optional[str] = None
     branch: Optional[str] = None
     supersedes: Optional[str] = None
+    # Internal: actual file path when loaded from disk (not serialized)
+    _file_path: Optional[str] = field(default=None, repr=False)
 
     def to_frontmatter(self) -> dict:
         """Convert to YAML frontmatter dict."""
@@ -71,7 +73,8 @@ class Memory:
     def to_metadata(self) -> dict:
         """Convert to metadata dict for ChromaDB."""
         meta = self.to_frontmatter()
-        meta["file"] = self.get_relative_path()
+        # Use actual file path if loaded from disk, otherwise generate it
+        meta["file"] = self._file_path if self._file_path else self.get_relative_path()
         return meta
 
     def get_relative_path(self) -> str:
@@ -107,8 +110,14 @@ class Memory:
         return slug[:40]  # Limit length
 
     @classmethod
-    def from_file(cls, path: Path) -> "Memory":
-        """Parse a memory from a markdown file with YAML frontmatter."""
+    def from_file(cls, path: Path, relative_to: Optional[Path] = None) -> "Memory":
+        """
+        Parse a memory from a markdown file with YAML frontmatter.
+
+        Args:
+            path: Full path to the markdown file
+            relative_to: Base directory to compute relative path from (for indexing)
+        """
         text = path.read_text()
 
         if not text.startswith("---"):
@@ -121,6 +130,14 @@ class Memory:
 
         frontmatter = yaml.safe_load(parts[1])
         content = parts[2].strip()
+
+        # Compute relative file path for indexing
+        file_path = None
+        if relative_to:
+            try:
+                file_path = str(path.relative_to(relative_to))
+            except ValueError:
+                pass  # path not relative to base, will regenerate
 
         return cls(
             id=frontmatter.get("id", str(uuid.uuid4())[:8]),
@@ -138,6 +155,7 @@ class Memory:
             epic=frontmatter.get("epic"),
             branch=frontmatter.get("branch"),
             supersedes=frontmatter.get("supersedes"),
+            _file_path=file_path,
         )
 
 
@@ -204,7 +222,8 @@ class MemoryStore:
         file_path = self.memory_dir / file_rel_path
 
         if file_path.exists():
-            return Memory.from_file(file_path)
+            # Pass relative_to so the memory preserves its actual file path
+            return Memory.from_file(file_path, relative_to=self.memory_dir)
 
         return None
 
@@ -283,29 +302,41 @@ class MemoryStore:
         limit: int = 100,
     ) -> list[Memory]:
         """List memories with optional filters."""
-        where = {}
+        # Build filter conditions
+        conditions = []
+        namespace_prefix = None
 
         if namespace:
             if namespace.endswith("*"):
-                # Prefix match - ChromaDB doesn't support this directly
-                # We'll filter in Python
-                pass
+                # Prefix match - filter in Python after fetching
+                namespace_prefix = namespace[:-1]
             else:
-                where["namespace"] = namespace
+                conditions.append({"namespace": namespace})
 
         if type_filter:
-            where["type"] = type_filter
+            conditions.append({"type": type_filter})
 
         if status:
-            where["status"] = status
+            conditions.append({"status": status})
 
         if component:
-            where["component"] = component
+            conditions.append({"component": component})
+
+        # Build where clause with $and if multiple conditions
+        if len(conditions) == 0:
+            where = None
+        elif len(conditions) == 1:
+            where = conditions[0]
+        else:
+            where = {"$and": conditions}
+
+        # When using prefix match, fetch more results since we'll filter some out
+        fetch_limit = limit * 5 if namespace_prefix else limit
 
         # Get from ChromaDB
         results = self.db.collection.get(
-            where=where if where else None,
-            limit=limit,
+            where=where,
+            limit=fetch_limit,
         )
 
         memories = []
@@ -314,9 +345,8 @@ class MemoryStore:
             content = results["documents"][i] if results["documents"] else ""
 
             # Handle namespace prefix filtering
-            if namespace and namespace.endswith("*"):
-                prefix = namespace[:-1]
-                if not metadata.get("namespace", "").startswith(prefix):
+            if namespace_prefix:
+                if not metadata.get("namespace", "").startswith(namespace_prefix):
                     continue
 
             memories.append(Memory(
@@ -331,6 +361,10 @@ class MemoryStore:
                 added=metadata.get("added", ""),
                 author=metadata.get("author"),
             ))
+
+            # Stop once we have enough
+            if len(memories) >= limit:
+                break
 
         return memories
 
@@ -367,7 +401,8 @@ class MemoryStore:
         count = 0
         for md_file in self.memory_dir.rglob("*.md"):
             try:
-                memory = Memory.from_file(md_file)
+                # Pass memory_dir so the actual file path is stored, not regenerated
+                memory = Memory.from_file(md_file, relative_to=self.memory_dir)
                 self.db.upsert(
                     ids=[memory.id],
                     documents=[memory.content],

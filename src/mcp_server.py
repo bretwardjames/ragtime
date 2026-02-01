@@ -487,7 +487,7 @@ class RagtimeMCPServer:
                         "protocolVersion": "2024-11-05",
                         "serverInfo": {
                             "name": "ragtime",
-                            "version": "0.2.9",
+                            "version": "0.2.10",
                         },
                         "capabilities": {
                             "tools": {},
