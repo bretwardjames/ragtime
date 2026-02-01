@@ -13,6 +13,7 @@ from typing import Any
 
 from .db import RagtimeDB
 from .memory import Memory, MemoryStore
+from .feedback import FeedbackStore, SearchFeedback
 
 
 class RagtimeMCPServer:
@@ -28,6 +29,7 @@ class RagtimeMCPServer:
         self.project_path = project_path or Path.cwd()
         self._db = None
         self._store = None
+        self._feedback = None
 
     @property
     def db(self) -> RagtimeDB:
@@ -43,6 +45,14 @@ class RagtimeMCPServer:
         if self._store is None:
             self._store = MemoryStore(self.project_path, self.db)
         return self._store
+
+    @property
+    def feedback(self) -> FeedbackStore:
+        """Lazy-load the feedback store."""
+        if self._feedback is None:
+            feedback_path = self.project_path / ".ragtime" / "feedback"
+            self._feedback = FeedbackStore(feedback_path)
+        return self._feedback
 
     def get_author(self) -> str:
         """Get the current developer's username."""
@@ -132,13 +142,18 @@ class RagtimeMCPServer:
             },
             {
                 "name": "search",
-                "description": "Smart hybrid search over indexed code and docs. Auto-detects qualifiers like 'mobile', 'auth', 'dart' in your query and ensures they appear in results. Returns function signatures, class definitions, and doc summaries with file paths and line numbers. IMPORTANT: Results are summaries only - use the Read tool on returned file paths to see full implementations.",
+                "description": "Smart hybrid search over indexed content. Auto-detects qualifiers like 'mobile', 'auth', 'dart' and ensures they appear in results. Use tiered=true for priority ordering (memories > docs > code). Returns summaries with file paths - use Read tool for full implementations.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Natural language search query. Qualifiers like 'in mobile', 'for auth', 'dart' are auto-detected and used for filtering."
+                            "description": "Natural language search query. Qualifiers like 'in mobile', 'for auth', 'dart' are auto-detected."
+                        },
+                        "tiered": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "If true, search in priority order: memories (curated) > docs > code. Good for conceptual queries."
                         },
                         "namespace": {
                             "type": "string",
@@ -146,7 +161,7 @@ class RagtimeMCPServer:
                         },
                         "type": {
                             "type": "string",
-                            "description": "Filter by type (docs, code, architecture, etc.)"
+                            "description": "Filter by type (docs, code, architecture, etc.). Ignored if tiered=true."
                         },
                         "component": {
                             "type": "string",
@@ -155,12 +170,12 @@ class RagtimeMCPServer:
                         "require_terms": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Additional terms that MUST appear in results. Usually not needed since qualifiers are auto-detected from the query."
+                            "description": "Additional terms that MUST appear in results. Usually not needed since qualifiers are auto-detected."
                         },
                         "auto_extract": {
                             "type": "boolean",
                             "default": True,
-                            "description": "Auto-detect component qualifiers from query (default: true). Set to false for literal/raw search."
+                            "description": "Auto-detect component qualifiers from query. Set to false for literal search."
                         },
                         "limit": {
                             "type": "integer",
@@ -292,6 +307,42 @@ class RagtimeMCPServer:
                     },
                     "required": ["memory_id", "status"]
                 }
+            },
+            {
+                "name": "record_feedback",
+                "description": "Record feedback when search results are used or referenced. Call this after using a search result to improve future rankings.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The original search query"
+                        },
+                        "result_file": {
+                            "type": "string",
+                            "description": "File path of the result that was used"
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["used", "referenced", "helpful", "not_helpful"],
+                            "default": "used",
+                            "description": "What happened with this result"
+                        },
+                        "position": {
+                            "type": "integer",
+                            "description": "Position in search results (1-indexed)"
+                        }
+                    },
+                    "required": ["query", "result_file"]
+                }
+            },
+            {
+                "name": "feedback_stats",
+                "description": "Get statistics about search result usage patterns",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
             }
         ]
 
@@ -313,6 +364,10 @@ class RagtimeMCPServer:
             return self._graduate(arguments)
         elif name == "update_status":
             return self._update_status(arguments)
+        elif name == "record_feedback":
+            return self._record_feedback(arguments)
+        elif name == "feedback_stats":
+            return self._feedback_stats(arguments)
         else:
             raise ValueError(f"Unknown tool: {name}")
 
@@ -344,23 +399,42 @@ class RagtimeMCPServer:
 
     def _search(self, args: dict) -> dict:
         """Search indexed content with smart query understanding."""
-        results = self.db.search(
-            query=args["query"],
-            limit=args.get("limit", 10),
-            namespace=args.get("namespace"),
-            type_filter=args.get("type"),
-            component=args.get("component"),
-            require_terms=args.get("require_terms"),
-            auto_extract=args.get("auto_extract", True),
-        )
+        if args.get("tiered", False):
+            # Tiered search: memories > docs > code
+            results = self.db.search_tiered(
+                query=args["query"],
+                limit=args.get("limit", 10),
+                namespace=args.get("namespace"),
+                require_terms=args.get("require_terms"),
+                auto_extract=args.get("auto_extract", True),
+                component=args.get("component"),
+            )
+        else:
+            results = self.db.search(
+                query=args["query"],
+                limit=args.get("limit", 10),
+                namespace=args.get("namespace"),
+                type_filter=args.get("type"),
+                component=args.get("component"),
+                require_terms=args.get("require_terms"),
+                auto_extract=args.get("auto_extract", True),
+            )
+
+        # Apply feedback-based boosts
+        boosts = self.feedback.get_boost_scores()
+        if boosts:
+            results = self.feedback.apply_boosts(results, boosts)
 
         return {
             "count": len(results),
+            "query": args["query"],
             "results": [
                 {
                     "content": r["content"],
                     "metadata": r["metadata"],
                     "score": 1 - r["distance"] if r["distance"] else None,
+                    "boosted": r.get("boosted", False),
+                    "tier": r.get("tier"),  # For tiered search
                 }
                 for r in results
             ]
@@ -485,6 +559,45 @@ class RagtimeMCPServer:
             "status": args["status"],
         }
 
+    def _record_feedback(self, args: dict) -> dict:
+        """Record feedback for a search result."""
+        feedback = SearchFeedback(
+            query=args["query"],
+            result_id="",  # We match by file path
+            result_file=args["result_file"],
+            action=args.get("action", "used"),
+            position=args.get("position", 0),
+        )
+
+        self.feedback.record(feedback)
+
+        return {
+            "success": True,
+            "query": args["query"],
+            "result_file": args["result_file"],
+            "action": feedback.action,
+        }
+
+    def _feedback_stats(self, args: dict) -> dict:
+        """Get feedback statistics."""
+        stats = self.feedback.get_usage_stats()
+        boosts = self.feedback.get_boost_scores()
+
+        # Get top boosted files
+        top_files = sorted(boosts.items(), key=lambda x: x[1], reverse=True)[:10]
+
+        return {
+            "total_feedback": stats["total"],
+            "results_used": stats["used"],
+            "results_ignored": stats["ignored"],
+            "helpful_count": stats["helpful"],
+            "not_helpful_count": stats["not_helpful"],
+            "avg_position_used": round(stats["avg_position_used"], 2),
+            "top_boosted_files": [
+                {"file": f, "boost": round(b, 2)} for f, b in top_files
+            ],
+        }
+
     def handle_message(self, message: dict) -> dict:
         """Handle an incoming JSON-RPC message."""
         method = message.get("method")
@@ -499,7 +612,7 @@ class RagtimeMCPServer:
                         "protocolVersion": "2024-11-05",
                         "serverInfo": {
                             "name": "ragtime",
-                            "version": "0.2.14",
+                            "version": "0.2.15",
                         },
                         "capabilities": {
                             "tools": {},

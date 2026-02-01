@@ -238,6 +238,118 @@ class RagtimeDB:
 
         return output
 
+    def search_tiered(
+        self,
+        query: str,
+        limit: int = 10,
+        namespace: str | None = None,
+        require_terms: list[str] | None = None,
+        auto_extract: bool = True,
+        **filters,
+    ) -> list[dict]:
+        """
+        Tiered search: prioritizes memories > docs > code.
+
+        Searches in priority order, filling up to limit:
+        1. Memories (curated, high-signal knowledge)
+        2. Documentation (indexed markdown)
+        3. Code (broadest, implementation details)
+
+        Args:
+            query: Natural language search query
+            limit: Max total results to return
+            namespace: Filter by namespace
+            require_terms: Terms that MUST appear in results
+            auto_extract: Auto-detect qualifiers from query
+            **filters: Additional metadata filters
+
+        Returns:
+            List of dicts with 'content', 'metadata', 'distance', 'tier'
+        """
+        results = []
+
+        # Tier 1: Memories (not docs or code)
+        memory_results = self._search_tier(
+            query=query,
+            tier_name="memory",
+            exclude_types=["docs", "code"],
+            limit=limit,
+            namespace=namespace,
+            require_terms=require_terms,
+            auto_extract=auto_extract,
+            **filters,
+        )
+        results.extend(memory_results)
+
+        # Tier 2: Documentation
+        if len(results) < limit:
+            doc_results = self._search_tier(
+                query=query,
+                tier_name="docs",
+                type_filter="docs",
+                limit=limit - len(results),
+                namespace=namespace,
+                require_terms=require_terms,
+                auto_extract=auto_extract,
+                **filters,
+            )
+            results.extend(doc_results)
+
+        # Tier 3: Code
+        if len(results) < limit:
+            code_results = self._search_tier(
+                query=query,
+                tier_name="code",
+                type_filter="code",
+                limit=limit - len(results),
+                namespace=namespace,
+                require_terms=require_terms,
+                auto_extract=auto_extract,
+                **filters,
+            )
+            results.extend(code_results)
+
+        return results
+
+    def _search_tier(
+        self,
+        query: str,
+        tier_name: str,
+        limit: int,
+        type_filter: str | None = None,
+        exclude_types: list[str] | None = None,
+        **kwargs,
+    ) -> list[dict]:
+        """Search a single tier and tag results."""
+        # Build where clause for exclusion if needed
+        if exclude_types:
+            # Search without type filter, then exclude in post-processing
+            results = self.search(
+                query=query,
+                limit=limit * 2,  # fetch more since we'll filter
+                type_filter=None,
+                **kwargs,
+            )
+            # Filter out excluded types
+            filtered = []
+            for r in results:
+                if r["metadata"].get("type") not in exclude_types:
+                    r["tier"] = tier_name
+                    filtered.append(r)
+                    if len(filtered) >= limit:
+                        break
+            return filtered
+        else:
+            results = self.search(
+                query=query,
+                limit=limit,
+                type_filter=type_filter,
+                **kwargs,
+            )
+            for r in results:
+                r["tier"] = tier_name
+            return results
+
     def delete(self, ids: list[str]) -> None:
         """Delete documents by ID."""
         self.collection.delete(ids=ids)

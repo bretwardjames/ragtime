@@ -381,13 +381,13 @@ def index(path: Path, index_type: str, clear: bool):
                     item_show_func=lambda f: f.name[:30] if f else "",
                 ) as files:
                     for file_path in files:
-                        entry = index_doc_file(file_path)
-                        if entry:
-                            entries.append(entry)
+                        # index_doc_file returns list (hierarchical chunks)
+                        file_entries = index_doc_file(file_path)
+                        entries.extend(file_entries)
 
                 if entries:
                     _upsert_entries(db, entries, "docs")
-                    click.echo(f"  Indexed {len(entries)} documents")
+                    click.echo(f"  Indexed {len(entries)} document chunks")
             elif not to_delete:
                 click.echo("  All docs up to date")
         else:
