@@ -111,9 +111,41 @@ class Memory:
         return slug[:40]  # Limit length
 
     @classmethod
+    def _infer_metadata_from_path(cls, relative_path: str) -> dict:
+        """
+        Infer namespace, component, and type from folder structure.
+
+        Supports:
+          app/{component}/*.md → namespace=app, component={component}
+          app/*.md → namespace=app
+          team/*.md → namespace=team
+          users/{username}/*.md → namespace=user-{username}
+          branches/{branch}/*.md → namespace=branch-{branch}
+        """
+        parts = relative_path.replace("\\", "/").split("/")
+        metadata = {}
+
+        if len(parts) >= 1:
+            first = parts[0]
+            if first == "app":
+                metadata["namespace"] = "app"
+                if len(parts) >= 3:  # app/{component}/file.md
+                    metadata["component"] = parts[1]
+            elif first == "team":
+                metadata["namespace"] = "team"
+            elif first == "users" and len(parts) >= 2:
+                metadata["namespace"] = f"user-{parts[1]}"
+            elif first == "branches" and len(parts) >= 2:
+                metadata["namespace"] = f"branch-{parts[1]}"
+
+        return metadata
+
+    @classmethod
     def from_file(cls, path: Path, relative_to: Optional[Path] = None) -> "Memory":
         """
         Parse a memory from a markdown file with YAML frontmatter.
+
+        If no frontmatter exists, infers metadata from folder structure.
 
         Args:
             path: Full path to the markdown file
@@ -121,24 +153,40 @@ class Memory:
         """
         text = path.read_text()
 
+        # Compute relative path for inference and indexing
+        file_path = None
+        if relative_to:
+            try:
+                file_path = str(path.relative_to(relative_to))
+            except ValueError:
+                pass
+
+        # Handle files without frontmatter - infer from path
         if not text.startswith("---"):
-            raise ValueError(f"No YAML frontmatter found in {path}")
+            inferred = cls._infer_metadata_from_path(file_path or str(path))
+            # Generate stable ID from path
+            memory_id = hashlib.sha256((file_path or str(path)).encode()).hexdigest()[:8]
+
+            return cls(
+                id=memory_id,
+                content=text.strip(),
+                namespace=inferred.get("namespace", "app"),
+                type=inferred.get("type", "note"),
+                component=inferred.get("component"),
+                source="file",
+                _file_path=file_path,
+            )
 
         # Split frontmatter and content
         parts = text.split("---", 2)
         if len(parts) < 3:
             raise ValueError(f"Invalid frontmatter format in {path}")
 
-        frontmatter = yaml.safe_load(parts[1])
+        frontmatter = yaml.safe_load(parts[1]) or {}
         content = parts[2].strip()
 
-        # Compute relative file path for indexing
-        file_path = None
-        if relative_to:
-            try:
-                file_path = str(path.relative_to(relative_to))
-            except ValueError:
-                pass  # path not relative to base, will regenerate
+        # Infer missing metadata from folder structure
+        inferred = cls._infer_metadata_from_path(file_path or str(path))
 
         # Use frontmatter ID if present, otherwise derive stable ID from file path
         # This ensures reindex is idempotent - same file always gets same ID
@@ -154,9 +202,10 @@ class Memory:
         return cls(
             id=memory_id,
             content=content,
-            namespace=frontmatter.get("namespace", "app"),
-            type=frontmatter.get("type", "unknown"),
-            component=frontmatter.get("component"),
+            # Use frontmatter if present, fall back to inferred, then defaults
+            namespace=frontmatter.get("namespace") or inferred.get("namespace", "app"),
+            type=frontmatter.get("type") or inferred.get("type", "note"),
+            component=frontmatter.get("component") or inferred.get("component"),
             confidence=frontmatter.get("confidence", "medium"),
             confidence_reason=frontmatter.get("confidence_reason"),
             source=frontmatter.get("source", "file"),
@@ -423,7 +472,9 @@ class MemoryStore:
         """
         Reindex all memory files.
 
-        Scans .ragtime/ and indexes any files not in ChromaDB.
+        Scans .ragtime/ and indexes files. Removes old entries for each file
+        before upserting to prevent duplicates from ID changes.
+
         Returns count of files indexed.
         """
         if not self.memory_dir.exists():
@@ -432,7 +483,13 @@ class MemoryStore:
         count = 0
         for md_file in self.memory_dir.rglob("*.md"):
             try:
-                # Pass memory_dir so the actual file path is stored, not regenerated
+                # Compute relative path for this file
+                rel_path = str(md_file.relative_to(self.memory_dir))
+
+                # Delete any existing entries for this file path (handles ID changes)
+                self.db.delete_by_file([rel_path])
+
+                # Parse and index with stable ID
                 memory = Memory.from_file(md_file, relative_to=self.memory_dir)
                 self.db.upsert(
                     ids=[memory.id],

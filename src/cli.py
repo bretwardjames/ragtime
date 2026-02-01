@@ -736,47 +736,68 @@ def reindex(path: Path):
 
 @main.command()
 @click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
-@click.option("--dry-run", is_flag=True, help="Show duplicates without removing them")
+@click.option("--dry-run", is_flag=True, help="Show what would be removed")
 def dedupe(path: Path, dry_run: bool):
-    """Remove duplicate entries from the index.
+    """Clean up index: remove duplicates and orphaned entries.
 
-    Keeps one entry per unique file path, removing duplicates created
-    by older versions of reindex that generated random IDs.
+    - Removes duplicate entries (keeps one per file path)
+    - Removes orphaned entries (files that no longer exist on disk)
     """
     path = Path(path).resolve()
     db = get_db(path)
+    memory_dir = path / ".ragtime"
 
     # Get all entries with their file paths
     results = db.collection.get(include=["metadatas"])
 
-    # Group by file path
+    # Group by file path and track orphans
     by_file: dict[str, list[str]] = {}
+    orphans: list[str] = []
+
     for i, mem_id in enumerate(results["ids"]):
         file_path = results["metadatas"][i].get("file", "")
-        if file_path:
-            if file_path not in by_file:
-                by_file[file_path] = []
-            by_file[file_path].append(mem_id)
+        entry_type = results["metadatas"][i].get("type", "")
 
-    # Find duplicates
-    duplicates_to_remove = []
+        # Skip docs/code entries - only clean up memory entries
+        if entry_type in ("docs", "code"):
+            continue
+
+        if not file_path:
+            orphans.append(mem_id)
+            continue
+
+        # Check if file exists on disk
+        full_path = memory_dir / file_path
+        if not full_path.exists():
+            orphans.append(mem_id)
+            if dry_run:
+                click.echo(f"  Orphan: {file_path} (file missing)")
+            continue
+
+        if file_path not in by_file:
+            by_file[file_path] = []
+        by_file[file_path].append(mem_id)
+
+    # Find duplicates (keep first, remove rest)
+    duplicates: list[str] = []
     for file_path, ids in by_file.items():
         if len(ids) > 1:
-            # Keep the first one, remove the rest
-            duplicates_to_remove.extend(ids[1:])
+            duplicates.extend(ids[1:])
             if dry_run:
-                click.echo(f"  {file_path}: {len(ids)} copies (would remove {len(ids) - 1})")
+                click.echo(f"  Duplicate: {file_path} ({len(ids)} copies, removing {len(ids) - 1})")
 
-    if not duplicates_to_remove:
-        click.echo("✓ No duplicates found")
+    to_remove = orphans + duplicates
+
+    if not to_remove:
+        click.echo("✓ Index is clean (no duplicates or orphans)")
         return
 
     if dry_run:
-        click.echo(f"\nWould remove {len(duplicates_to_remove)} duplicate entries")
+        click.echo(f"\nWould remove {len(orphans)} orphans + {len(duplicates)} duplicates = {len(to_remove)} entries")
         click.echo("Run without --dry-run to remove them")
     else:
-        db.delete(duplicates_to_remove)
-        click.echo(f"✓ Removed {len(duplicates_to_remove)} duplicate entries")
+        db.delete(to_remove)
+        click.echo(f"✓ Removed {len(orphans)} orphans + {len(duplicates)} duplicates = {len(to_remove)} entries")
 
 
 @main.command("new-branch")
