@@ -169,7 +169,7 @@ def get_remote_branches_with_ragtime(path: Path) -> list[str]:
 
 
 @click.group()
-@click.version_option(version="0.2.8")
+@click.version_option(version="0.2.9")
 def main():
     """Ragtime - semantic search over code and documentation."""
     pass
@@ -2137,7 +2137,7 @@ def update(check: bool):
     from urllib.request import urlopen
     from urllib.error import URLError
 
-    current = "0.2.8"
+    current = "0.2.9"
 
     click.echo(f"Current version: {current}")
     click.echo("Checking PyPI for updates...")

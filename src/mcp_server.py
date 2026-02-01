@@ -132,7 +132,7 @@ class RagtimeMCPServer:
             },
             {
                 "name": "search",
-                "description": "Semantic search over indexed content and memories",
+                "description": "Semantic search over indexed code and docs. Returns function signatures, class definitions, and doc summaries with file paths and line numbers. IMPORTANT: Results are summaries only - use the Read tool on returned file paths to see full implementations before making code changes or decisions.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -487,7 +487,7 @@ class RagtimeMCPServer:
                         "protocolVersion": "2024-11-05",
                         "serverInfo": {
                             "name": "ragtime",
-                            "version": "0.2.8",
+                            "version": "0.2.9",
                         },
                         "capabilities": {
                             "tools": {},
