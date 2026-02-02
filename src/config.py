@@ -44,7 +44,11 @@ class CodeConfig:
         "**/__tests__/**",
         "**/*.test.*",
         "**/*.spec.*",
-        # Python init files (rarely have searchable content)
+        # Python virtual environments and cache
+        "**/venv/**",
+        "**/.venv/**",
+        "**/site-packages/**",
+        "**/__pycache__/**",
         "**/__init__.py",
     ])
 
