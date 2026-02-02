@@ -817,16 +817,81 @@ def forget(memory_id: str, path: Path):
 
 
 @main.command()
-@click.argument("memory_id")
+@click.argument("memory_id", required=False)
 @click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
+@click.option("--list", "list_candidates", is_flag=True, help="List graduation candidates")
+@click.option("--branch", "-b", help="Branch name or slug (default: current branch)")
 @click.option("--confidence", default="high",
               type=click.Choice(["high", "medium", "low"]),
               help="Confidence level for graduated memory")
-def graduate(memory_id: str, path: Path, confidence: str):
-    """Graduate a branch memory to app namespace."""
+def graduate(memory_id: str, path: Path, list_candidates: bool, branch: str, confidence: str):
+    """Graduate a branch memory to app namespace.
+
+    With --list: Show branch memories that are candidates for graduation.
+    With MEMORY_ID: Graduate a specific memory to app namespace.
+
+    Examples:
+        ragtime graduate --list              # List candidates for current branch
+        ragtime graduate --list -b feature/auth  # List candidates for specific branch
+        ragtime graduate abc123              # Graduate specific memory
+    """
     path = Path(path).resolve()
     store = get_memory_store(path)
 
+    # List mode: show graduation candidates
+    if list_candidates or not memory_id:
+        # Determine branch
+        if not branch:
+            branch = get_current_branch(path)
+            if not branch:
+                click.echo("✗ Not in a git repository or no branch specified", err=True)
+                return
+
+        # Create namespace pattern (handle both original and slugified)
+        branch_slug = branch.replace("/", "-")
+        namespace = f"branch-{branch_slug}"
+
+        # Get memories for this branch
+        memories = store.list_memories(namespace=namespace, status="active")
+
+        if not memories:
+            click.echo(f"No active memories found for branch: {branch}")
+            click.echo(f"  (namespace: {namespace})")
+            return
+
+        # Filter to graduation candidates (exclude context type)
+        candidates = [m for m in memories if m.type != "context"]
+
+        if not candidates:
+            click.echo(f"No graduation candidates for branch: {branch}")
+            click.echo(f"  (found {len(memories)} memories, but all are context type)")
+            return
+
+        click.echo(f"\nGraduation candidates for branch: {branch}")
+        click.echo(f"{'─' * 50}")
+
+        for i, mem in enumerate(candidates, 1):
+            type_badge = f"[{mem.type}]" if mem.type else "[unknown]"
+            confidence_badge = f"({mem.confidence})" if hasattr(mem, 'confidence') and mem.confidence else ""
+
+            click.echo(f"\n  {i}. {type_badge} {confidence_badge}")
+            click.echo(f"     ID: {mem.id}")
+
+            # Show preview
+            preview = mem.content[:150].replace("\n", " ").strip()
+            if len(mem.content) > 150:
+                preview += "..."
+            click.echo(f"     {preview}")
+
+            if hasattr(mem, 'added') and mem.added:
+                click.echo(f"     Added: {mem.added}")
+
+        click.echo(f"\n{'─' * 50}")
+        click.echo(f"{len(candidates)} candidate(s) found.")
+        click.echo(f"\nTo graduate: ragtime graduate <ID>")
+        return
+
+    # Graduate mode: graduate specific memory
     try:
         graduated = store.graduate(memory_id, confidence)
         if graduated:
@@ -891,6 +956,568 @@ def reindex(path: Path):
 
     count = store.reindex()
     click.echo(f"✓ Reindexed {count} memory files")
+
+
+@main.command("check-conventions")
+@click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
+@click.option("--files", "-f", help="Files to check (comma-separated or JSON array)")
+@click.option("--branch", "-b", help="Branch to diff against main (default: current branch)")
+@click.option("--event-file", type=click.Path(exists=True, path_type=Path), help="GHP event file (JSON)")
+@click.option("--include-memories", is_flag=True, default=True, help="Include convention memories")
+@click.option("--all", "return_all", is_flag=True, help="Return ALL conventions (for AI workflows)")
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON (for MCP/hooks)")
+def check_conventions(path: Path, files: str, branch: str, event_file: Path,
+                      include_memories: bool, return_all: bool, json_output: bool):
+    """Show conventions applicable to changed files.
+
+    Used by pre-PR hooks to check code against team conventions.
+
+    By default, returns only conventions RELEVANT to the changed files (semantic search).
+    Use --all to return ALL conventions (useful for AI workflows that analyze edge cases).
+
+    Examples:
+        ragtime check-conventions                    # Relevant conventions only
+        ragtime check-conventions --all             # ALL conventions (for AI)
+        ragtime check-conventions -f "src/auth.ts"  # Conventions relevant to specific file
+        ragtime check-conventions --event-file /tmp/ghp-event.json --all  # From GHP hook
+    """
+    import json as json_module
+
+    path = Path(path).resolve()
+    config = RagtimeConfig.load(path)
+
+    # Load from event file if provided (GHP hook pattern)
+    if event_file:
+        try:
+            event_data = json_module.loads(Path(event_file).read_text())
+            # Event file can provide changed_files and branch
+            if not files and "changed_files" in event_data:
+                files = event_data["changed_files"]
+            if not branch and "branch" in event_data:
+                branch = event_data["branch"]
+        except (json_module.JSONDecodeError, IOError) as e:
+            click.echo(f"⚠ Could not read event file: {e}", err=True)
+
+    # Determine files to check
+    changed_files = []
+    if files:
+        # Handle list (from event file) or string (from CLI)
+        if isinstance(files, list):
+            changed_files = files
+        elif files.startswith("["):
+            try:
+                changed_files = json_module.loads(files)
+            except json_module.JSONDecodeError:
+                changed_files = [f.strip() for f in files.split(",")]
+        else:
+            changed_files = [f.strip() for f in files.split(",")]
+    else:
+        # Get changed files from git diff
+        if not branch:
+            branch = get_current_branch(path)
+        if branch and branch not in ("main", "master"):
+            result = subprocess.run(
+                ["git", "diff", "--name-only", "main...HEAD"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                changed_files = [f for f in result.stdout.strip().split("\n") if f]
+
+    # Gather conventions from files
+    conventions_data = {
+        "files": [],
+        "memories": [],
+        "changed_files": changed_files,
+    }
+
+    # Read convention files from config
+    for conv_file in config.conventions.files:
+        conv_path = path / conv_file
+        if conv_path.exists():
+            if conv_path.is_file():
+                content = conv_path.read_text()
+                conventions_data["files"].append({
+                    "path": str(conv_file),
+                    "content": content,
+                })
+            elif conv_path.is_dir():
+                # If it's a directory, read all files in it
+                for f in conv_path.rglob("*"):
+                    if f.is_file() and f.suffix in (".md", ".txt", ".yaml", ".yml"):
+                        content = f.read_text()
+                        conventions_data["files"].append({
+                            "path": str(f.relative_to(path)),
+                            "content": content,
+                        })
+
+    # Search memories for conventions
+    if include_memories and config.conventions.also_search_memories:
+        store = get_memory_store(path)
+        db = get_db(path)
+
+        if return_all:
+            # Return ALL convention/pattern memories (for AI workflows)
+            for ns in ["team", "app"]:
+                memories = store.list_memories(namespace=ns, type_filter="convention", status="active")
+                for mem in memories:
+                    conventions_data["memories"].append({
+                        "id": mem.id,
+                        "namespace": mem.namespace,
+                        "content": mem.content,
+                        "component": mem.component,
+                    })
+                # Also get pattern-type memories
+                patterns = store.list_memories(namespace=ns, type_filter="pattern", status="active")
+                for mem in patterns:
+                    conventions_data["memories"].append({
+                        "id": mem.id,
+                        "namespace": mem.namespace,
+                        "type": "pattern",
+                        "content": mem.content,
+                        "component": mem.component,
+                    })
+        else:
+            # Semantic search for RELEVANT conventions based on changed files
+            if changed_files:
+                # Build search query from file paths and names
+                # Extract meaningful terms: paths, extensions, inferred components
+                search_terms = set()
+                for f in changed_files:
+                    parts = Path(f).parts
+                    search_terms.update(parts)  # Add path components
+                    search_terms.add(Path(f).suffix.lstrip("."))  # Add extension
+                    search_terms.add(Path(f).stem)  # Add filename without ext
+
+                # Remove common noise
+                noise = {"src", "lib", "test", "tests", "spec", "specs", "", "js", "ts", "py", "md"}
+                search_terms = search_terms - noise
+
+                query = f"conventions patterns rules standards for {' '.join(search_terms)}"
+
+                # Search both namespaces using the db directly
+                seen_ids = set()
+                for ns in ["team", "app"]:
+                    results = db.search(query, namespace=ns, limit=50)
+                    for result in results:
+                        meta = result.get("metadata", {})
+                        result_type = meta.get("type", "")
+                        result_category = meta.get("category", "")
+                        # Include convention/pattern types OR docs with category="convention"
+                        is_convention_content = (
+                            result_type in ("convention", "pattern") or
+                            result_category == "convention"
+                        )
+                        if is_convention_content:
+                            mem_id = meta.get("id") or meta.get("file", "")
+                            if mem_id not in seen_ids:
+                                seen_ids.add(mem_id)
+                                distance = result.get("distance", 1)
+                                score = 1 - distance if distance else 0
+                                conventions_data["memories"].append({
+                                    "id": mem_id,
+                                    "namespace": ns,
+                                    "type": result_type,
+                                    "content": result.get("content", ""),
+                                    "component": meta.get("component"),
+                                    "relevance": score,
+                                })
+            else:
+                # No changed files - fall back to listing all
+                for ns in ["team", "app"]:
+                    memories = store.list_memories(namespace=ns, type_filter="convention", status="active")
+                    for mem in memories:
+                        conventions_data["memories"].append({
+                            "id": mem.id,
+                            "namespace": mem.namespace,
+                            "content": mem.content,
+                            "component": mem.component,
+                        })
+
+    # Output
+    if json_output:
+        click.echo(json_module.dumps(conventions_data, indent=2))
+        return
+
+    # Human-friendly output
+    click.echo(f"\nConventions Check")
+    click.echo(f"{'═' * 50}")
+
+    if changed_files:
+        click.echo(f"\nFiles to check ({len(changed_files)}):")
+        for f in changed_files[:10]:
+            click.echo(f"  • {f}")
+        if len(changed_files) > 10:
+            click.echo(f"  ... and {len(changed_files) - 10} more")
+
+    click.echo(f"\n{'─' * 50}")
+    click.echo(f"Convention Files ({len(conventions_data['files'])}):")
+
+    if not conventions_data["files"]:
+        click.echo("  No convention files found.")
+        click.echo(f"  Configure in .ragtime/config.yaml under 'conventions.files'")
+    else:
+        for conv in conventions_data["files"]:
+            click.echo(f"\n  📄 {conv['path']}")
+            # Show first few lines as preview
+            lines = conv["content"].strip().split("\n")[:5]
+            for line in lines:
+                if line.strip():
+                    click.echo(f"     {line[:70]}{'...' if len(line) > 70 else ''}")
+
+    if conventions_data["memories"]:
+        click.echo(f"\n{'─' * 50}")
+        mode_label = "All" if return_all else "Relevant"
+        click.echo(f"Convention Memories - {mode_label} ({len(conventions_data['memories'])}):")
+
+        for mem in conventions_data["memories"]:
+            type_str = mem.get("type", "convention")
+            relevance = mem.get("relevance")
+            relevance_str = f" (relevance: {relevance:.2f})" if relevance else ""
+            click.echo(f"\n  [{mem['id'][:8] if mem['id'] else '?'}] {mem['namespace']} / {type_str}{relevance_str}")
+            if mem.get("component"):
+                click.echo(f"     Component: {mem['component']}")
+            preview = mem["content"][:100].replace("\n", " ")
+            click.echo(f"     {preview}...")
+
+    click.echo(f"\n{'═' * 50}")
+    total = len(conventions_data["files"]) + len(conventions_data["memories"])
+    mode_note = " (all)" if return_all else " (filtered by relevance)"
+    click.echo(f"Total: {total} convention source(s){mode_note}")
+
+
+@main.command("add-convention")
+@click.argument("content", required=False)
+@click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
+@click.option("--component", "-c", help="Component this convention applies to")
+@click.option("--to-file", type=click.Path(path_type=Path), help="Add to specific file")
+@click.option("--to-memory", is_flag=True, help="Store as memory only (not in git)")
+@click.option("--quiet", "-q", is_flag=True, help="Non-interactive mode")
+def add_convention(content: str | None, path: Path, component: str | None,
+                   to_file: Path | None, to_memory: bool, quiet: bool):
+    """Add a new convention with smart storage routing.
+
+    Finds the best place to store the convention:
+    - Existing doc with ## Conventions section (if component matches)
+    - Convention folder (.ragtime/conventions/)
+    - Central conventions file (.ragtime/CONVENTIONS.md)
+    - Memory only (searchable but not committed)
+
+    Examples:
+        ragtime add-convention "Always use async/await, never .then()"
+        ragtime add-convention --component auth "JWT tokens expire after 15 minutes"
+        ragtime add-convention --to-file docs/api.md "Use snake_case for JSON"
+        ragtime add-convention --to-memory "Prefer composition over inheritance"
+    """
+    path = Path(path).resolve()
+    config = RagtimeConfig.load(path)
+
+    # Get content interactively if not provided
+    if not content:
+        content = click.prompt("Convention to add")
+
+    if not content.strip():
+        click.echo("✗ No content provided", err=True)
+        return
+
+    # If explicit destination provided, use it
+    if to_memory:
+        _store_convention_as_memory(path, content, component)
+        return
+
+    if to_file:
+        _append_convention_to_file(path, to_file, content)
+        return
+
+    # Auto-routing based on config
+    storage_mode = config.conventions.storage
+
+    if storage_mode == "memory":
+        _store_convention_as_memory(path, content, component)
+        return
+
+    # Find storage options
+    options = _find_convention_storage_options(path, config, component)
+
+    if storage_mode == "file" or (storage_mode == "auto" and options):
+        # Use first available file option, or default
+        if options:
+            target = options[0]
+        else:
+            target = {
+                "type": "default_file",
+                "path": config.conventions.default_file,
+                "description": "Central conventions file",
+            }
+        _store_convention_to_target(path, target, content, component)
+        return
+
+    if storage_mode == "ask" or (storage_mode == "auto" and not quiet):
+        # Present options to user
+        click.echo("\nWhere should this convention be stored?\n")
+
+        choices = []
+        for i, opt in enumerate(options, 1):
+            icon = "📄" if opt["type"] == "existing_section" else "📁" if opt["type"] == "folder" else "📋"
+            click.echo(f"  {i}. {icon} {opt['description']}")
+            click.echo(f"       {opt['path']}")
+            choices.append(opt)
+
+        # Add default options if not already present
+        default_file_present = any(o["path"] == config.conventions.default_file for o in choices)
+        if not default_file_present:
+            i = len(choices) + 1
+            click.echo(f"  {i}. 📋 Central conventions file")
+            click.echo(f"       {config.conventions.default_file}")
+            choices.append({
+                "type": "default_file",
+                "path": config.conventions.default_file,
+                "description": "Central conventions file",
+            })
+
+        i = len(choices) + 1
+        click.echo(f"  {i}. 🧠 Memory only (not committed)")
+        click.echo(f"       Stored in team namespace, searchable but not in git")
+        choices.append({"type": "memory", "path": None, "description": "Memory only"})
+
+        click.echo()
+        choice = click.prompt("Choice", type=int, default=1)
+
+        if choice < 1 or choice > len(choices):
+            click.echo("✗ Invalid choice", err=True)
+            return
+
+        target = choices[choice - 1]
+        if target["type"] == "memory":
+            _store_convention_as_memory(path, content, component)
+        else:
+            _store_convention_to_target(path, target, content, component)
+        return
+
+    # Fallback: memory only
+    _store_convention_as_memory(path, content, component)
+
+
+def _find_convention_storage_options(path: Path, config: RagtimeConfig, component: str | None) -> list[dict]:
+    """Find potential storage locations for a convention."""
+    import re
+    options = []
+
+    # 1. Check for existing docs with ## Conventions sections
+    for scan_path in config.conventions.scan_docs_for_sections:
+        scan_dir = path / scan_path
+        if scan_dir.exists() and scan_dir.is_dir():
+            for md_file in scan_dir.rglob("*.md"):
+                content = md_file.read_text()
+                # Look for ## Conventions header
+                if re.search(r'^##\s+(Conventions?|Rules|Standards|Guidelines)', content, re.MULTILINE | re.IGNORECASE):
+                    # If component specified, check if file relates to it
+                    file_component = md_file.stem.lower()
+                    rel_path = md_file.relative_to(path)
+
+                    if component:
+                        if component.lower() in str(rel_path).lower():
+                            options.insert(0, {  # Prioritize component match
+                                "type": "existing_section",
+                                "path": str(rel_path),
+                                "description": f"Add to existing Conventions section ({file_component})",
+                            })
+                    else:
+                        options.append({
+                            "type": "existing_section",
+                            "path": str(rel_path),
+                            "description": f"Add to existing Conventions section",
+                        })
+
+    # 2. Check if convention folder exists
+    folder = path / config.conventions.folder
+    if folder.exists() and folder.is_dir():
+        if component:
+            target_file = f"{component.lower()}.md"
+            options.append({
+                "type": "folder",
+                "path": f"{config.conventions.folder}{target_file}",
+                "description": f"Create/append to {target_file} in conventions folder",
+            })
+        else:
+            options.append({
+                "type": "folder",
+                "path": f"{config.conventions.folder}general.md",
+                "description": "Add to general.md in conventions folder",
+            })
+
+    # 3. Check if default conventions file exists
+    default_file = path / config.conventions.default_file
+    if default_file.exists():
+        options.append({
+            "type": "default_file",
+            "path": config.conventions.default_file,
+            "description": "Append to central conventions file",
+        })
+
+    return options
+
+
+def _store_convention_as_memory(path: Path, content: str, component: str | None):
+    """Store convention as a memory in team namespace."""
+    from datetime import date
+    store = get_memory_store(path)
+
+    memory = Memory(
+        content=content,
+        namespace="team",
+        type="convention",
+        component=component,
+        confidence="high",
+        confidence_reason="user-added",
+        source="add-convention",
+        status="active",
+        added=date.today().isoformat(),
+        author=get_author(),
+    )
+
+    file_path = store.save(memory)
+    click.echo(f"✓ Convention stored as memory")
+    click.echo(f"  ID: {memory.id}")
+    click.echo(f"  File: {file_path.relative_to(path)}")
+    click.echo(f"  Namespace: team")
+
+
+def _store_convention_to_target(path: Path, target: dict, content: str, component: str | None):
+    """Store convention to a file target."""
+    import re
+
+    target_path = path / target["path"]
+    target_type = target["type"]
+
+    if target_type == "existing_section":
+        # Append to existing ## Conventions section
+        if not target_path.exists():
+            click.echo(f"✗ File not found: {target['path']}", err=True)
+            return
+
+        file_content = target_path.read_text()
+
+        # Find the Conventions section and append
+        pattern = r'(^##\s+(?:Conventions?|Rules|Standards|Guidelines).*?)(\n##|\Z)'
+        match = re.search(pattern, file_content, re.MULTILINE | re.IGNORECASE | re.DOTALL)
+
+        if match:
+            section_end = match.end(1)
+            new_content = file_content[:section_end] + f"\n\n- {content}" + file_content[section_end:]
+            target_path.write_text(new_content)
+            click.echo(f"✓ Convention added to {target['path']}")
+            click.echo(f"  Added to ## Conventions section")
+        else:
+            click.echo(f"✗ Could not find Conventions section in {target['path']}", err=True)
+
+    elif target_type == "folder":
+        # Create or append to file in conventions folder
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if target_path.exists():
+            # Append to existing file
+            existing = target_path.read_text()
+            new_content = existing.rstrip() + f"\n\n- {content}\n"
+        else:
+            # Create new file
+            title = target_path.stem.replace("-", " ").replace("_", " ").title()
+            new_content = f"""---
+namespace: team
+type: convention
+component: {component or ''}
+---
+
+# {title} Conventions
+
+- {content}
+"""
+        target_path.write_text(new_content)
+        click.echo(f"✓ Convention added to {target['path']}")
+
+    elif target_type == "default_file":
+        # Create or append to default conventions file
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if target_path.exists():
+            existing = target_path.read_text()
+            # Check if there's a component section
+            if component:
+                section_pattern = rf'^##\s+{re.escape(component)}.*?(?=\n##|\Z)'
+                match = re.search(section_pattern, existing, re.MULTILINE | re.IGNORECASE | re.DOTALL)
+                if match:
+                    # Append to component section
+                    section_end = match.end()
+                    new_content = existing[:section_end] + f"\n- {content}" + existing[section_end:]
+                else:
+                    # Create new component section
+                    new_content = existing.rstrip() + f"\n\n## {component.title()}\n\n- {content}\n"
+            else:
+                # Append to general section or end
+                new_content = existing.rstrip() + f"\n\n- {content}\n"
+        else:
+            # Create new file
+            header = f"## {component.title()}\n\n" if component else ""
+            new_content = f"""# Team Conventions
+
+{header}- {content}
+"""
+        target_path.write_text(new_content)
+        click.echo(f"✓ Convention added to {target['path']}")
+
+    # Reindex the file
+    _reindex_convention_file(path, target_path)
+
+
+def _append_convention_to_file(path: Path, to_file: Path, content: str):
+    """Append a convention directly to a user-specified file."""
+    import re
+
+    target_path = path / to_file if not to_file.is_absolute() else to_file
+
+    if not target_path.exists():
+        click.echo(f"✗ File not found: {to_file}", err=True)
+        return
+
+    file_content = target_path.read_text()
+
+    # Try to find a Conventions section to append to
+    pattern = r'(^##\s+(?:Conventions?|Rules|Standards|Guidelines).*?)(\n##|\Z)'
+    match = re.search(pattern, file_content, re.MULTILINE | re.IGNORECASE | re.DOTALL)
+
+    if match:
+        # Append to existing section
+        section_end = match.end(1)
+        new_content = file_content[:section_end] + f"\n\n- {content}" + file_content[section_end:]
+        target_path.write_text(new_content)
+        click.echo(f"✓ Convention added to {to_file}")
+        click.echo(f"  Added to ## Conventions section")
+    else:
+        # Append at end of file
+        new_content = file_content.rstrip() + f"\n\n- {content}\n"
+        target_path.write_text(new_content)
+        click.echo(f"✓ Convention appended to {to_file}")
+
+    # Reindex the file
+    _reindex_convention_file(path, target_path)
+
+
+def _reindex_convention_file(path: Path, target_path: Path):
+    """Reindex a convention file after modification."""
+    try:
+        db = get_db(path)
+        from .indexers.docs import index_file
+        entries = index_file(target_path)
+        for entry in entries:
+            db.upsert(
+                ids=[f"{entry.file_path}:{entry.chunk_index}"],
+                documents=[entry.content],
+                metadatas=[entry.to_metadata()],
+            )
+        click.echo(f"  Indexed {len(entries)} section(s)")
+    except Exception as e:
+        click.echo(f"  ⚠ Could not reindex: {e}")
 
 
 @main.command()
@@ -1020,9 +1647,9 @@ def new_branch(issue: int, path: Path, content: str, issue_json: str, branch: st
         click.echo(f"✗ Could not fetch issue #{issue}", err=True)
         return
 
-    title = issue_data.get("title", f"Issue #{issue}")
-    body = issue_data.get("body", "")
-    labels = issue_data.get("labels", [])
+    title = issue_data.get("title") or f"Issue #{issue}"
+    body = issue_data.get("body") or ""  # Handle null and empty
+    labels = issue_data.get("labels") or []
 
     if labels:
         if isinstance(labels[0], dict):
@@ -1076,115 +1703,244 @@ author: {get_author()}
 
 
 # ============================================================================
-# Command Installation
+# Usage Documentation
 # ============================================================================
 
 
-def get_commands_dir() -> Path:
-    """Get the directory containing bundled command templates."""
-    return Path(__file__).parent / "commands"
+@main.command("usage")
+@click.option("--section", "-s", help="Show specific section (mcp, cli, workflows, conventions)")
+def usage(section: str | None):
+    """Show how to use ragtime effectively with AI agents.
 
+    Prints documentation on integrating ragtime into your AI workflow,
+    whether using the MCP server or CLI directly.
+    """
+    sections = {
+        "mcp": USAGE_MCP,
+        "cli": USAGE_CLI,
+        "workflows": USAGE_WORKFLOWS,
+        "conventions": USAGE_CONVENTIONS,
+    }
 
-def get_available_commands() -> list[str]:
-    """List available command templates."""
-    commands_dir = get_commands_dir()
-    if not commands_dir.exists():
-        return []
-    return [f.stem for f in commands_dir.glob("*.md")]
-
-
-@main.command("install")
-@click.option("--global", "global_install", is_flag=True, help="Install to ~/.claude/commands/")
-@click.option("--workspace", "workspace_install", is_flag=True, help="Install to .claude/commands/")
-@click.option("--list", "list_commands", is_flag=True, help="List available commands")
-@click.option("--force", is_flag=True, help="Overwrite existing commands without asking")
-@click.argument("commands", nargs=-1)
-def install_commands(global_install: bool, workspace_install: bool, list_commands: bool,
-                     force: bool, commands: tuple):
-    """Install Claude command templates."""
-    available = get_available_commands()
-
-    if list_commands:
-        click.echo("Available commands:")
-        for cmd in available:
-            click.echo(f"  - {cmd}")
-        return
-
-    if global_install and workspace_install:
-        click.echo("Error: Cannot specify both --global and --workspace", err=True)
-        return
-
-    if global_install:
-        target_dir = Path.home() / ".claude" / "commands"
-    elif workspace_install:
-        target_dir = Path.cwd() / ".claude" / "commands"
-    else:
-        target_dir = Path.cwd() / ".claude" / "commands"
-        click.echo("Installing to workspace (.claude/commands/)")
-
-    if commands:
-        to_install = [c for c in commands if c in available]
-        not_found = [c for c in commands if c not in available]
-        if not_found:
-            click.echo(f"Warning: Commands not found: {', '.join(not_found)}", err=True)
-    else:
-        to_install = available
-
-    if not to_install:
-        click.echo("No commands to install.")
-        return
-
-    target_dir.mkdir(parents=True, exist_ok=True)
-    commands_dir = get_commands_dir()
-    installed = 0
-    skipped = 0
-    namespaced = 0
-
-    for cmd in to_install:
-        source = commands_dir / f"{cmd}.md"
-        target = target_dir / f"{cmd}.md"
-        namespaced_target = target_dir / f"ragtime-{cmd}.md"
-
-        if target.exists() and not force:
-            # Check if it's our file (contains ragtime marker)
-            existing_content = target.read_text()
-            is_ragtime_file = "ragtime" in existing_content.lower() and "mcp__ragtime" in existing_content
-
-            if is_ragtime_file:
-                # It's our file, safe to overwrite
-                target.write_text(source.read_text())
-                click.echo(f"  ✓ {cmd}.md (updated)")
-                installed += 1
-            else:
-                # Conflict with non-ragtime command
-                click.echo(f"\n⚠️  Conflict: {cmd}.md already exists (not a ragtime command)")
-                click.echo(f"   1. Overwrite with ragtime's version")
-                click.echo(f"   2. Skip (keep existing)")
-                click.echo(f"   3. Install as ragtime-{cmd}.md")
-
-                choice = click.prompt("   Choice", type=click.Choice(["1", "2", "3"]), default="2")
-
-                if choice == "1":
-                    target.write_text(source.read_text())
-                    click.echo(f"  ✓ {cmd}.md (overwritten)")
-                    installed += 1
-                elif choice == "2":
-                    click.echo(f"  • {cmd}.md (skipped)")
-                    skipped += 1
-                else:
-                    namespaced_target.write_text(source.read_text())
-                    click.echo(f"  ✓ ragtime-{cmd}.md")
-                    namespaced += 1
+    if section:
+        if section.lower() in sections:
+            click.echo(sections[section.lower()])
         else:
-            target.write_text(source.read_text())
-            click.echo(f"  ✓ {cmd}.md")
-            installed += 1
+            click.echo(f"Unknown section: {section}")
+            click.echo(f"Available: {', '.join(sections.keys())}")
+        return
 
-    click.echo(f"\nInstalled {installed} commands to {target_dir}")
-    if namespaced:
-        click.echo(f"  ({namespaced} installed with ragtime- prefix)")
-    if skipped:
-        click.echo(f"  ({skipped} skipped due to conflicts)")
+    # Print all sections
+    click.echo(USAGE_HEADER)
+    for content in sections.values():
+        click.echo(content)
+        click.echo()
+
+
+USAGE_HEADER = """
+# Ragtime Usage Guide
+
+Ragtime provides persistent memory for AI coding sessions. Use it via:
+- **MCP Server** (recommended for Claude Code / AI tools)
+- **CLI** (for scripts, hooks, and manual use)
+"""
+
+USAGE_MCP = """
+## MCP Server Tools
+
+After `ragtime init`, add to your `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "ragtime": {
+      "command": "ragtime",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+### Core Tools
+
+| Tool | Purpose |
+|------|---------|
+| `mcp__ragtime__search` | Find relevant memories, docs, and code |
+| `mcp__ragtime__remember` | Store new knowledge |
+| `mcp__ragtime__list_memories` | Browse stored memories |
+| `mcp__ragtime__forget` | Delete a memory |
+| `mcp__ragtime__graduate` | Promote branch memory to app namespace |
+
+### Search Examples
+
+```
+# Find architecture knowledge
+mcp__ragtime__search(query="authentication flow", namespace="app")
+
+# Find team conventions
+mcp__ragtime__search(query="error handling", namespace="team", type="convention")
+
+# Search with auto-qualifier detection
+mcp__ragtime__search(query="how does auth work in mobile", tiered=true)
+```
+
+### Remember Examples
+
+```
+# Store architecture insight
+mcp__ragtime__remember(
+  content="JWT tokens expire after 15 minutes, refresh tokens after 7 days",
+  namespace="app",
+  type="architecture",
+  component="auth"
+)
+
+# Store team convention
+mcp__ragtime__remember(
+  content="Always use async/await, never .then() chains",
+  namespace="team",
+  type="convention"
+)
+
+# Store branch-specific decision
+mcp__ragtime__remember(
+  content="Using Redis for session storage because of horizontal scaling needs",
+  namespace="branch-feature/auth",
+  type="decision"
+)
+```
+"""
+
+USAGE_CLI = """
+## CLI Commands
+
+### Memory Management
+
+```bash
+# Search memories
+ragtime search "authentication patterns"
+ragtime search "conventions" --namespace team
+
+# Add a convention
+ragtime add-convention "Always validate user input"
+ragtime add-convention -c auth "JWT must be validated on every request"
+
+# List memories
+ragtime memories --namespace app
+ragtime memories --type convention
+
+# Check conventions for changed files
+ragtime check-conventions
+ragtime check-conventions --all  # For AI (comprehensive)
+```
+
+### Branch Context
+
+```bash
+# Create branch context from GitHub issue
+ragtime new-branch 123 --branch feature/auth
+
+# Graduate branch memories after PR merge
+ragtime graduate --branch feature/auth
+```
+
+### Indexing
+
+```bash
+# Index docs and code
+ragtime index
+ragtime reindex  # Full reindex
+```
+"""
+
+USAGE_WORKFLOWS = """
+## Recommended Workflows
+
+### Starting Work on an Issue
+
+1. AI reads the issue and existing context:
+   ```
+   mcp__ragtime__search(query="auth implementation", namespace="app")
+   ```
+
+2. Check for branch context:
+   ```bash
+   # Look for .ragtime/branches/{branch}/context.md
+   ```
+
+3. As you make decisions, store them:
+   ```
+   mcp__ragtime__remember(
+     content="Chose PKCE flow for mobile OAuth",
+     namespace="branch-feature/oauth",
+     type="decision"
+   )
+   ```
+
+### Before Creating a PR
+
+1. Check conventions:
+   ```bash
+   ragtime check-conventions
+   ```
+
+2. Review branch memories for graduation candidates
+
+### After PR Merge
+
+1. Graduate valuable branch memories to app namespace:
+   ```bash
+   ragtime graduate --branch feature/auth
+   ```
+
+### Session Handoff
+
+Store context in `.ragtime/branches/{branch}/context.md`:
+- Current state
+- What's left to do
+- Key decisions made
+- Blockers or notes for next session
+"""
+
+USAGE_CONVENTIONS = """
+## Convention System
+
+### Storing Conventions
+
+Conventions can live in:
+- **Files**: `.ragtime/CONVENTIONS.md` or `docs/conventions/`
+- **Doc sections**: Any `## Conventions` section in markdown
+- **Memories**: `team` namespace with type `convention`
+
+```bash
+# Add via CLI (routes automatically)
+ragtime add-convention "Use snake_case for JSON fields"
+
+# Add to specific file
+ragtime add-convention --to-file docs/api.md "Return 404 for missing resources"
+
+# Add as memory only
+ragtime add-convention --to-memory "Prefer composition over inheritance"
+```
+
+### Convention Detection
+
+The indexer automatically detects conventions from:
+- Files named `*conventions*`, `*rules*`, `*standards*`
+- Sections with headers like `## Conventions`, `## Rules`
+- Content between `<!-- convention -->` markers
+- Frontmatter: `has_conventions: true` or `convention_sections: [...]`
+
+### Checking Conventions
+
+```bash
+# Human use (filtered to relevant)
+ragtime check-conventions
+
+# AI use (comprehensive)
+ragtime check-conventions --all --json
+```
+"""
 
 
 @main.command("setup-ghp")
@@ -1219,7 +1975,8 @@ def setup_ghp(remove: bool):
         return
 
     # Updated path for .ragtime/
-    hook_command = "ragtime new-branch ${issue.number} --issue-json '${issue.json}' --branch '${branch}'"
+    # NOTE: No quotes around template vars - GHP's shellEscape() handles escaping
+    hook_command = "ragtime new-branch ${issue.number} --issue-json ${issue.json} --branch ${branch}"
 
     result = subprocess.run(
         [

@@ -1,7 +1,7 @@
 """
 Docs indexer - parses markdown files with YAML frontmatter.
 
-Designed for .claude/memory/ style files but works with any markdown.
+Designed for .ragtime/ style files but works with any markdown.
 """
 
 import os
@@ -70,12 +70,23 @@ class Section:
     content: str
     line_start: int
     parent_path: list[str]  # Parent headers for context
+    is_convention: bool = False  # True if this section contains conventions
+
+
+# Headers that indicate convention content
+CONVENTION_HEADERS = {
+    "conventions", "convention", "rules", "standards", "guidelines",
+    "code conventions", "coding conventions", "code standards",
+    "coding standards", "style guide", "code style",
+}
 
 
 def chunk_by_headers(
     content: str,
     min_chunk_size: int = 100,
     max_chunk_size: int = 2000,
+    convention_sections: list[str] | None = None,
+    all_conventions: bool = False,
 ) -> list[Section]:
     """
     Split markdown into sections by headers, preserving hierarchy.
@@ -84,27 +95,49 @@ def chunk_by_headers(
         content: Markdown body (without frontmatter)
         min_chunk_size: Minimum chars to make a standalone section
         max_chunk_size: Maximum chars before splitting further
+        convention_sections: List of section titles to mark as conventions
+        all_conventions: If True, mark ALL sections as conventions
 
     Returns:
         List of Section objects with hierarchical context
     """
     lines = content.split('\n')
     sections: list[Section] = []
-    header_stack: list[tuple[int, str]] = []  # (level, title) for building paths
+    header_stack: list[tuple[int, str, bool]] = []  # (level, title, is_convention)
 
     current_section_lines: list[str] = []
     current_section_start = 0
     current_title = ""
     current_level = 0
+    current_is_convention = False
+    in_convention_marker = False  # Track <!-- convention --> blocks
+
+    def is_convention_header(title: str) -> bool:
+        """Check if header indicates convention content."""
+        normalized = title.lower().strip()
+        return normalized in CONVENTION_HEADERS or any(
+            conv in normalized for conv in ["convention", "rule", "standard", "guideline"]
+        )
 
     def flush_section():
         """Save accumulated lines as a section."""
-        nonlocal current_section_lines, current_section_start, current_title, current_level
+        nonlocal current_section_lines, current_section_start, current_title, current_level, current_is_convention
 
         text = '\n'.join(current_section_lines).strip()
         if text:
             # Build parent path from stack (excluding current)
             parent_path = [h[1] for h in header_stack[:-1]] if header_stack else []
+
+            # Check if any parent is a convention header
+            parent_is_convention = any(h[2] for h in header_stack[:-1]) if header_stack else False
+
+            # Determine if this section is a convention
+            is_conv = (
+                all_conventions or
+                current_is_convention or
+                parent_is_convention or
+                (convention_sections and current_title in convention_sections)
+            )
 
             sections.append(Section(
                 title=current_title or "Introduction",
@@ -112,10 +145,19 @@ def chunk_by_headers(
                 content=text,
                 line_start=current_section_start,
                 parent_path=parent_path,
+                is_convention=is_conv,
             ))
         current_section_lines = []
 
     for i, line in enumerate(lines):
+        # Detect convention markers
+        if '<!-- convention -->' in line.lower() or '<!-- conventions -->' in line.lower():
+            in_convention_marker = True
+            continue
+        if '<!-- /convention -->' in line.lower() or '<!-- /conventions -->' in line.lower():
+            in_convention_marker = False
+            continue
+
         # Detect markdown headers
         header_match = re.match(r'^(#{1,6})\s+(.+)$', line)
 
@@ -126,16 +168,23 @@ def chunk_by_headers(
             level = len(header_match.group(1))
             title = header_match.group(2).strip()
 
+            # Check if this is a convention header
+            is_conv_header = is_convention_header(title)
+
             # Update header stack - pop headers at same or lower level
             while header_stack and header_stack[-1][0] >= level:
                 header_stack.pop()
-            header_stack.append((level, title))
+            header_stack.append((level, title, is_conv_header))
 
             current_title = title
             current_level = level
             current_section_start = i
+            current_is_convention = is_conv_header or in_convention_marker
             current_section_lines = [line]  # Include header in content
         else:
+            # If inside a convention marker, mark the content
+            if in_convention_marker and not current_is_convention:
+                current_is_convention = True
             current_section_lines.append(line)
 
     # Don't forget the last section
@@ -145,8 +194,10 @@ def chunk_by_headers(
     processed: list[Section] = []
     for section in sections:
         if len(section.content) < min_chunk_size and processed:
-            # Merge into previous section
+            # Merge into previous section (inherit is_convention if either has it)
             processed[-1].content += '\n\n' + section.content
+            if section.is_convention:
+                processed[-1].is_convention = True
         elif len(section.content) > max_chunk_size:
             # Split by paragraphs
             paragraphs = re.split(r'\n\n+', section.content)
@@ -161,6 +212,7 @@ def chunk_by_headers(
                         content=current_chunk.strip(),
                         line_start=section.line_start,
                         parent_path=section.parent_path,
+                        is_convention=section.is_convention,
                     ))
                     current_chunk = para
                     chunk_num += 1
@@ -175,6 +227,7 @@ def chunk_by_headers(
                     content=current_chunk.strip(),
                     line_start=section.line_start,
                     parent_path=section.parent_path,
+                    is_convention=section.is_convention,
                 ))
         else:
             processed.append(section)
@@ -213,13 +266,29 @@ def index_file(file_path: Path, hierarchical: bool = True) -> list[DocEntry]:
     base_component = metadata.get("component")
     base_title = metadata.get("title") or file_path.stem
 
+    # Convention detection from frontmatter
+    has_conventions = metadata.get("has_conventions", False)
+    convention_sections = metadata.get("convention_sections", [])
+
+    # Check if filename indicates conventions
+    filename_lower = file_path.stem.lower()
+    is_convention_file = any(
+        term in filename_lower
+        for term in ["convention", "conventions", "rules", "standards", "guidelines"]
+    )
+
     # Short docs: return as single entry
     if not hierarchical or len(body) < 500:
+        # Determine category - convention file or has_conventions flag
+        category = base_category
+        if is_convention_file or has_conventions:
+            category = "convention"
+
         return [DocEntry(
             content=body.strip(),
             file_path=str(file_path),
             namespace=base_namespace,
-            category=base_category,
+            category=category,
             component=base_component,
             title=base_title,
             mtime=mtime,
@@ -229,7 +298,11 @@ def index_file(file_path: Path, hierarchical: bool = True) -> list[DocEntry]:
         )]
 
     # Hierarchical chunking for longer docs
-    sections = chunk_by_headers(body)
+    sections = chunk_by_headers(
+        body,
+        convention_sections=convention_sections,
+        all_conventions=has_conventions or is_convention_file,
+    )
     entries = []
 
     for i, section in enumerate(sections):
@@ -242,11 +315,16 @@ def index_file(file_path: Path, hierarchical: bool = True) -> list[DocEntry]:
         if section.parent_path:
             context_prefix += f"Section: {' > '.join(section.parent_path)}\n\n"
 
+        # Determine category - convention sections get "convention" category
+        category = base_category
+        if section.is_convention:
+            category = "convention"
+
         entries.append(DocEntry(
             content=context_prefix + section.content,
             file_path=str(file_path),
             namespace=base_namespace,
-            category=base_category,
+            category=category,
             component=base_component,
             title=section.title,
             mtime=mtime,

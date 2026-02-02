@@ -2,6 +2,10 @@
 
 Local-first memory and RAG system for Claude Code. Semantic search over code, docs, and team knowledge.
 
+**Two interfaces, same data:**
+- **CLI** for humans - formatted output, interactive workflows
+- **MCP** for agents - structured data, tool integration
+
 ## Features
 
 - **Memory Storage**: Store structured knowledge with namespaces, types, and metadata
@@ -12,8 +16,8 @@ Local-first memory and RAG system for Claude Code. Semantic search over code, do
 - **Doc Generation**: Generate documentation from code (stubs or AI-powered)
 - **Debug Tools**: Verify index integrity, inspect similarity scores
 - **MCP Server**: Native Claude Code integration
-- **Claude Commands**: Pre-built `/remember`, `/recall`, `/create-pr`, `/generate-docs` commands
-- **ghp-cli Integration**: Auto-context when starting issues
+- **Usage Documentation**: Guidance for integrating ragtime into AI workflows
+- **ghp-cli Integration**: Auto-context when starting issues via hooks
 
 ## Installation
 
@@ -45,8 +49,8 @@ ragtime remember "Auth uses JWT with 15-min expiry" \
 # Search memories
 ragtime search "authentication" --namespace app
 
-# Install Claude commands
-ragtime install --workspace
+# View usage documentation for AI integration
+ragtime usage
 
 # Check for updates
 ragtime update --check
@@ -172,17 +176,17 @@ ragtime daemon status
 ragtime daemon stop
 ```
 
-### Claude Integration
+### Usage Documentation
 
 ```bash
-# Install Claude commands to workspace
-ragtime install --workspace
+# View all usage documentation
+ragtime usage
 
-# Install globally
-ragtime install --global
-
-# List available commands
-ragtime install --list
+# View specific sections
+ragtime usage --section mcp        # MCP server integration
+ragtime usage --section cli        # CLI workflow examples
+ragtime usage --section workflows  # Common AI workflow patterns
+ragtime usage --section conventions # Convention checking
 
 # Set up ghp-cli hooks
 ragtime setup-ghp
@@ -225,6 +229,10 @@ code:
 conventions:
   files: [".ragtime/CONVENTIONS.md"]
   also_search_memories: true
+  storage: auto  # auto | file | memory | ask
+  default_file: ".ragtime/CONVENTIONS.md"
+  folder: ".ragtime/conventions/"
+  scan_docs_for_sections: ["docs/"]
 ```
 
 ## How Search Works
@@ -374,21 +382,46 @@ Sessions are stored in Redis, not cookies.
 | `integration` | External service connections |
 | `context` | Session handoff |
 
-## Claude Commands
+## AI Integration
 
-After `ragtime install --workspace`:
+Ragtime is designed to work seamlessly with AI agents via MCP tools. Run `ragtime usage` for comprehensive documentation on integration patterns.
 
-| Command | Purpose |
-|---------|---------|
-| `/remember` | Capture knowledge mid-session |
-| `/recall` | Search memories |
-| `/handoff` | Save session context |
-| `/start` | Resume work on an issue |
-| `/create-pr` | Check conventions, graduate memories, create PR |
-| `/generate-docs` | AI-powered documentation generation from code |
-| `/import-docs` | Migrate existing docs to memories |
-| `/pr-graduate` | Curate branch knowledge (fallback if forgot before PR) |
-| `/audit` | Find duplicates/conflicts in memories |
+### Key Patterns
+
+**Memory Storage**: Use `remember` to capture architectural decisions, patterns, and context:
+```
+remember("Auth uses JWT with 15-min expiry", namespace="app", type="architecture", component="auth")
+```
+
+**Semantic Search**: Use `search` for finding relevant code and documentation:
+```
+search("how does authentication work", tiered=True)  # Prioritizes curated knowledge
+search("error handling", require_terms=["mobile", "dart"])  # Hybrid filtering
+```
+
+**Convention Checking**: Before PRs, verify code follows team standards:
+```bash
+ragtime check-conventions          # Filtered to changed files
+ragtime check-conventions --all    # All conventions (for AI analysis)
+```
+
+**Handoff Context**: Save session state for continuity:
+```
+store_doc(content="Session summary...", namespace="branch-feature-123", doc_type="handoff")
+```
+
+### Building Custom Commands
+
+Create project-specific slash commands in `.claude/commands/` that orchestrate ragtime tools:
+
+```markdown
+# .claude/commands/my-workflow.md
+1. Search for relevant context: search("$ARGUMENTS", tiered=True)
+2. Store any new insights: remember(...)
+3. Check conventions before suggesting changes
+```
+
+The **real value is in the MCP tools** - combine them however fits your workflow.
 
 ## MCP Server
 

@@ -51,9 +51,15 @@ class CodeConfig:
 
 @dataclass
 class ConventionsConfig:
-    """Configuration for convention checking."""
+    """Configuration for convention checking and storage."""
+    # Reading conventions
     files: list[str] = field(default_factory=lambda: [".ragtime/CONVENTIONS.md"])
     also_search_memories: bool = True
+    # Writing conventions
+    storage: str = "auto"  # "auto" | "file" | "memory" | "ask"
+    default_file: str = ".ragtime/CONVENTIONS.md"
+    folder: str = ".ragtime/conventions/"
+    scan_docs_for_sections: list[str] = field(default_factory=lambda: ["docs/"])
 
 
 @dataclass
@@ -97,6 +103,12 @@ class RagtimeConfig:
                 also_search_memories=conventions_data.get(
                     "also_search_memories", ConventionsConfig().also_search_memories
                 ),
+                storage=conventions_data.get("storage", ConventionsConfig().storage),
+                default_file=conventions_data.get("default_file", ConventionsConfig().default_file),
+                folder=conventions_data.get("folder", ConventionsConfig().folder),
+                scan_docs_for_sections=conventions_data.get(
+                    "scan_docs_for_sections", ConventionsConfig().scan_docs_for_sections
+                ),
             ),
         )
 
@@ -120,6 +132,10 @@ class RagtimeConfig:
             "conventions": {
                 "files": self.conventions.files,
                 "also_search_memories": self.conventions.also_search_memories,
+                "storage": self.conventions.storage,
+                "default_file": self.conventions.default_file,
+                "folder": self.conventions.folder,
+                "scan_docs_for_sections": self.conventions.scan_docs_for_sections,
             },
         }
 
