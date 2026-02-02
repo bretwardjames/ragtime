@@ -1,6 +1,6 @@
 [project]
 name = "ragtime-cli"
-version = "0.2.18"
+version = "0.3.0"
 description = "Local-first memory and RAG system for Claude Code - semantic search over code, docs, and team knowledge"
 readme = "README.md"
 license = "MIT"
@@ -48,9 +48,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]
-
-[tool.setuptools.package-data]
-"src.commands" = ["*.md"]
 
 [tool.ruff]
 line-length = 100
