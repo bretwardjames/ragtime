@@ -306,8 +306,17 @@ def setup_mcp_global(force: bool = False) -> bool:
     return False
 
 
+def get_version():
+    """Get version from package metadata."""
+    try:
+        from importlib.metadata import version
+        return version("ragtime-cli")
+    except Exception:
+        return "unknown"
+
+
 @click.group()
-@click.version_option(version="0.2.18")
+@click.version_option(version=get_version())
 @click.option("-y", "--force-defaults", is_flag=True, help="Accept all defaults without prompting")
 @click.pass_context
 def main(ctx, force_defaults: bool):
