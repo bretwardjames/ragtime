@@ -34,10 +34,12 @@ class CodeEntry:
     line_number: int       # Line where symbol starts
     docstring: str | None = None  # Extracted docstring/JSDoc
     mtime: float | None = None    # File modification time for incremental indexing
+    status: str = "ephemeral"     # "ephemeral" (working tree) or "permanent" (from main)
+    branch: str | None = None     # Branch name for ephemeral entries
 
     def to_metadata(self) -> dict:
         """Convert to ChromaDB metadata dict."""
-        return {
+        meta = {
             "type": "code",
             "file": self.file_path,
             "language": self.language,
@@ -45,7 +47,11 @@ class CodeEntry:
             "symbol_type": self.symbol_type,
             "line": self.line_number,
             "mtime": self.mtime or 0.0,
+            "status": self.status,
         }
+        if self.branch:
+            meta["branch"] = self.branch
+        return meta
 
 
 def get_extensions_for_languages(languages: list[str]) -> list[str]:
@@ -482,6 +488,48 @@ def index_file(file_path: Path) -> list[CodeEntry]:
     # Set mtime on all entries from this file
     for entry in entries:
         entry.mtime = mtime
+
+    return entries
+
+
+def index_content(file_path: str, content: str, status: str = "ephemeral",
+                  branch: str | None = None) -> list[CodeEntry]:
+    """
+    Parse code content into CodeEntry objects.
+
+    Unlike index_file, this takes content directly (for indexing from git refs).
+
+    Args:
+        file_path: Path to attribute to the entries (for display/filtering)
+        content: The code content to parse
+        status: "ephemeral" or "permanent"
+        branch: Branch name (for ephemeral entries)
+
+    Returns:
+        List of CodeEntry objects
+    """
+    if not content.strip():
+        return []
+
+    # Determine file type from path
+    suffix = Path(file_path).suffix.lower()
+    path_obj = Path(file_path)
+
+    if suffix == ".py":
+        entries = index_python_file(path_obj, content)
+    elif suffix in [".ts", ".tsx", ".js", ".jsx"]:
+        entries = index_typescript_file(path_obj, content)
+    elif suffix == ".vue":
+        entries = index_vue_file(path_obj, content)
+    elif suffix == ".dart":
+        entries = index_dart_file(path_obj, content)
+    else:
+        return []
+
+    # Set status and branch on all entries
+    for entry in entries:
+        entry.status = status
+        entry.branch = branch
 
     return entries
 

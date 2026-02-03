@@ -25,10 +25,15 @@ class DocEntry:
     section_path: str | None = None  # e.g., "Installation > Configuration > Environment Variables"
     section_level: int = 0  # Header depth (0=whole doc, 1=h1, 2=h2, etc.)
     chunk_index: int = 0  # Position within file (for stable IDs)
+    # Line tracking for section-level ephemeral detection
+    line_number: int = 1  # Starting line of this section
+    # Status tracking for ephemeral/permanent
+    status: str = "ephemeral"     # "ephemeral" (working tree) or "permanent" (from main)
+    branch: str | None = None     # Branch name for ephemeral entries
 
     def to_metadata(self) -> dict:
         """Convert to ChromaDB metadata dict."""
-        return {
+        meta = {
             "type": "docs",
             "file": self.file_path,
             "namespace": self.namespace or "default",
@@ -38,7 +43,12 @@ class DocEntry:
             "mtime": self.mtime or 0.0,
             "section_path": self.section_path or "",
             "section_level": self.section_level,
+            "line": self.line_number,
+            "status": self.status,
         }
+        if self.branch:
+            meta["branch"] = self.branch
+        return meta
 
 
 def parse_frontmatter(content: str) -> tuple[dict, str]:
@@ -331,6 +341,108 @@ def index_file(file_path: Path, hierarchical: bool = True) -> list[DocEntry]:
             section_path=section_path,
             section_level=section.level,
             chunk_index=i,
+            line_number=section.line_start,
+        ))
+
+    return entries
+
+
+def index_content(file_path: str, content: str, hierarchical: bool = True,
+                  status: str = "ephemeral", branch: str | None = None) -> list[DocEntry]:
+    """
+    Parse markdown content into DocEntry objects.
+
+    Unlike index_file, this takes content directly (for indexing from git refs).
+
+    Args:
+        file_path: Path to attribute to the entries (for display/filtering)
+        content: The markdown content to parse
+        hierarchical: If True, chunk by headers for better semantic search
+        status: "ephemeral" or "permanent"
+        branch: Branch name (for ephemeral entries)
+
+    Returns:
+        List of DocEntry objects
+    """
+    metadata, body = parse_frontmatter(content)
+
+    if not body.strip():
+        return []
+
+    path_obj = Path(file_path)
+
+    # Base metadata from frontmatter
+    base_namespace = metadata.get("namespace")
+    base_category = metadata.get("category")
+    base_component = metadata.get("component")
+    base_title = metadata.get("title") or path_obj.stem
+
+    # Convention detection from frontmatter
+    has_conventions = metadata.get("has_conventions", False)
+    convention_sections = metadata.get("convention_sections", [])
+
+    # Check if filename indicates conventions
+    filename_lower = path_obj.stem.lower()
+    is_convention_file = any(
+        term in filename_lower
+        for term in ["convention", "conventions", "rules", "standards", "guidelines"]
+    )
+
+    # Short docs: return as single entry
+    if not hierarchical or len(body) < 500:
+        category = base_category
+        if is_convention_file or has_conventions:
+            category = "convention"
+
+        return [DocEntry(
+            content=body.strip(),
+            file_path=file_path,
+            namespace=base_namespace,
+            category=category,
+            component=base_component,
+            title=base_title,
+            mtime=0.0,  # No mtime for git ref content
+            section_path="",
+            section_level=0,
+            chunk_index=0,
+            status=status,
+            branch=branch,
+        )]
+
+    # Hierarchical chunking for longer docs
+    sections = chunk_by_headers(
+        body,
+        convention_sections=convention_sections,
+        all_conventions=has_conventions or is_convention_file,
+    )
+    entries = []
+
+    for i, section in enumerate(sections):
+        path_parts = section.parent_path + [section.title]
+        section_path = " > ".join(path_parts)
+
+        context_prefix = f"# {base_title}\n"
+        if section.parent_path:
+            context_prefix += f"Section: {' > '.join(section.parent_path)}\n\n"
+
+        category = base_category
+        if section.is_convention:
+            category = "convention"
+
+        entries.append(DocEntry(
+            content=context_prefix + section.content,
+            file_path=file_path,
+            namespace=base_namespace,
+            category=category,
+            component=base_component,
+            title=section.title,
+            mtime=0.0,
+            section_path=section_path,
+            section_level=section.level,
+            chunk_index=i,
+            line_number=section.line_start,
+            status=status,
+            branch=branch,
         ))
 
     return entries

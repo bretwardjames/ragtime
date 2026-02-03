@@ -2,6 +2,7 @@
 Ragtime CLI - semantic search and memory storage.
 """
 
+from fnmatch import fnmatch
 from pathlib import Path
 import json
 import subprocess
@@ -13,22 +14,151 @@ import sys
 from .db import RagtimeDB
 from .config import RagtimeConfig, init_config
 from .indexers import (
-    discover_docs, index_doc_file, DocEntry,
-    discover_code_files, index_code_file, CodeEntry,
+    discover_docs, index_doc_file, DocEntry, index_doc_content,
+    discover_code_files, index_code_file, CodeEntry, index_code_content,
 )
 from .memory import Memory, MemoryStore
 
 
+def get_git_common_dir(path: Path) -> Path:
+    """Get the common git directory (handles worktrees).
+
+    For regular repos, returns .git directory.
+    For worktrees, returns the main repo's .git directory.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            common_dir = result.stdout.strip()
+            # Convert to absolute path if relative
+            common_path = Path(common_dir)
+            if not common_path.is_absolute():
+                common_path = (path / common_path).resolve()
+            return common_path
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    # Fallback to .git in current path
+    return path / ".git"
+
+
+def get_main_repo_path(path: Path) -> Path:
+    """Get the main repository path (handles worktrees).
+
+    For regular repos, returns the given path.
+    For worktrees, returns the main repo's root directory.
+    """
+    common_dir = get_git_common_dir(path)
+    # The common dir is typically /path/to/repo/.git
+    # So the repo root is its parent
+    if common_dir.name == ".git":
+        return common_dir.parent
+    # For bare repos or unusual setups, try to find the toplevel
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=common_dir.parent if common_dir.exists() else path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return Path(result.stdout.strip())
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return path
+
+
+def list_worktrees(path: Path) -> list[dict]:
+    """List all worktrees for a repository.
+
+    Returns list of dicts with 'path', 'branch', 'head' for each worktree.
+    Includes the main repo as the first entry.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return []
+
+        worktrees = []
+        current: dict = {}
+
+        for line in result.stdout.strip().split("\n"):
+            if line.startswith("worktree "):
+                if current:
+                    worktrees.append(current)
+                current = {"path": line[9:]}
+            elif line.startswith("HEAD "):
+                current["head"] = line[5:]
+            elif line.startswith("branch "):
+                # refs/heads/branch-name -> branch-name
+                branch = line[7:]
+                if branch.startswith("refs/heads/"):
+                    branch = branch[11:]
+                current["branch"] = branch
+            elif line == "detached":
+                current["branch"] = None
+                current["detached"] = True
+
+        if current:
+            worktrees.append(current)
+
+        return worktrees
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
+
+
+def is_worktree(path: Path) -> bool:
+    """Check if the given path is a git worktree (not the main repo)."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            git_dir = result.stdout.strip()
+            # Worktrees have .git files pointing elsewhere, not .git directories
+            git_path = path / git_dir
+            return git_path.is_file() or "worktrees" in git_dir
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return False
+
+
 def get_db(project_path: Path) -> RagtimeDB:
-    """Get or create database for a project."""
-    db_path = project_path / ".ragtime" / "index"
+    """Get or create database for a project.
+
+    Uses the main repo's .ragtime directory even when in a worktree,
+    ensuring all worktrees share the same index.
+    """
+    main_repo = get_main_repo_path(project_path)
+    db_path = main_repo / ".ragtime" / "index"
     return RagtimeDB(db_path)
 
 
 def get_memory_store(project_path: Path) -> MemoryStore:
-    """Get memory store for a project."""
+    """Get memory store for a project.
+
+    Uses the main repo's .ragtime directory even when in a worktree,
+    ensuring all worktrees share the same memories.
+    """
+    main_repo = get_main_repo_path(project_path)
     db = get_db(project_path)
-    return MemoryStore(project_path, db)
+    return MemoryStore(main_repo, db)
 
 
 def get_author() -> str:
@@ -132,6 +262,109 @@ def get_branch_slug(ref: str) -> str:
     if ref.startswith("origin/"):
         ref = ref[7:]
     return ref.replace("/", "-")
+
+
+def git_show_file(path: Path, ref: str, file_path: str) -> str | None:
+    """Read a file's contents from a git ref without checkout."""
+    try:
+        result = subprocess.run(
+            ["git", "show", f"{ref}:{file_path}"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return result.stdout
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return None
+
+
+def git_ls_files(path: Path, ref: str, patterns: list[str] | None = None) -> list[str]:
+    """List files in a git ref, optionally filtered by patterns."""
+    try:
+        cmd = ["git", "ls-tree", "-r", "--name-only", ref]
+        result = subprocess.run(
+            cmd,
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return []
+
+        files = [f for f in result.stdout.strip().split("\n") if f]
+
+        if patterns:
+            filtered = []
+            for f in files:
+                for pattern in patterns:
+                    if fnmatch(f, pattern):
+                        filtered.append(f)
+                        break
+            return filtered
+
+        return files
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
+
+
+def get_changed_files_from_main(path: Path) -> set[str]:
+    """Get set of files that have changed from origin/main (or origin/master).
+
+    Includes modified, added, and deleted files. Returns absolute paths.
+    """
+    main_ref = get_main_ref(path)
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", main_ref],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            files = [f.strip() for f in result.stdout.strip().split("\n") if f.strip()]
+            # Convert to absolute paths
+            return {str((path / f).resolve()) for f in files}
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return set()
+
+
+
+
+def get_main_ref(path: Path) -> str:
+    """Get the appropriate main branch ref (origin/main or origin/master)."""
+    try:
+        # Check if origin/main exists
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "origin/main"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return "origin/main"
+
+        # Fall back to origin/master
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "origin/master"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return "origin/master"
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    # Default to origin/main
+    return "origin/main"
 
 
 def get_remote_branches_with_ragtime(path: Path) -> list[str]:
@@ -484,147 +717,92 @@ def _get_files_to_process(
 @click.option("--type", "index_type", type=click.Choice(["all", "docs", "code"]), default="all")
 @click.option("--clear", is_flag=True, help="Clear existing index before indexing")
 def index(path: Path, index_type: str, clear: bool):
-    """Index a project directory.
+    """Index local changes as ephemeral.
 
-    Without --clear, performs incremental indexing (only changed files).
+    Only indexes files that differ from origin/main. These are tagged as
+    "ephemeral" with the current branch name.
+
+    Use 'ragtime sync' to index from origin/main as "permanent" entries.
+    Together they form two logical databases:
+    - Permanent: from origin/main (convention checks use this)
+    - Ephemeral: your local changes (search sees both)
     """
     path = path.resolve()
     db = get_db(path)
     config = RagtimeConfig.load(path)
 
-    if clear:
-        click.echo("Clearing existing index...")
-        if index_type == "all":
-            db.clear()
-        else:
-            db.clear(type_filter=index_type)
+    # Get current branch for tagging ephemeral entries
+    current_branch = get_current_branch(path)
 
+    # Get files changed from main - only these get indexed as ephemeral
+    changed_files = get_changed_files_from_main(path)
+    if not changed_files:
+        click.echo("No files changed from main - nothing to index as ephemeral")
+        click.echo("Run 'ragtime sync' to index permanent entries from main")
+        return
+
+    click.echo(f"Indexing {len(changed_files)} changed files as ephemeral")
+    if current_branch:
+        click.echo(f"  Branch: {current_branch}")
+
+    # Clear existing ephemeral entries for this branch
+    if current_branch:
+        cleared = db.delete_by_branch(current_branch)
+        if cleared:
+            click.echo(f"  Cleared {cleared} old ephemeral entries")
+
+    # Filter to only changed files
+    changed_file_paths = []
+    for f in changed_files:
+        fp = Path(f)
+        if fp.exists():
+            changed_file_paths.append(fp)
+
+    # Index docs from changed files
     if index_type in ("all", "docs"):
-        # Get currently indexed docs
-        indexed_docs = {} if clear else db.get_indexed_files("docs")
+        doc_files = [f for f in changed_file_paths if f.suffix in (".md", ".txt")]
+        if doc_files:
+            entries = []
+            for file_path in doc_files:
+                file_entries = index_doc_file(file_path)
+                for entry in file_entries:
+                    entry.status = "ephemeral"
+                    entry.branch = current_branch
+                entries.extend(file_entries)
 
-        # Discover all doc files
-        all_doc_files = []
-        for docs_path in config.docs.paths:
-            docs_root = path / docs_path
-            if not docs_root.exists():
-                click.echo(f"  Docs path {docs_root} not found, skipping...")
-                continue
-            files = discover_docs(
-                docs_root,
-                patterns=config.docs.patterns,
-                exclude=config.docs.exclude,
-            )
-            all_doc_files.extend(files)
+            if entries:
+                _upsert_entries(db, entries, "docs")
+                click.echo(f"  Indexed {len(entries)} doc sections (ephemeral)")
 
-        if all_doc_files or indexed_docs:
-            # Determine what needs processing
-            to_index, to_delete = _get_files_to_process(all_doc_files, indexed_docs)
-
-            click.echo(f"Found {len(all_doc_files)} doc files")
-            if not clear:
-                unchanged = len(all_doc_files) - len(to_index)
-                if unchanged > 0:
-                    click.echo(f"  {unchanged} unchanged, {len(to_index)} to index")
-                if to_delete:
-                    click.echo(f"  {len(to_delete)} to remove (deleted from disk)")
-
-            # Delete removed files
-            if to_delete:
-                db.delete_by_file(to_delete, "docs")
-
-            # Index new/changed files
-            if to_index:
-                entries = []
-                with click.progressbar(
-                    to_index,
-                    label="  Parsing",
-                    show_percent=True,
-                    show_pos=True,
-                    item_show_func=lambda f: f.name[:30] if f else "",
-                ) as files:
-                    for file_path in files:
-                        # index_doc_file returns list (hierarchical chunks)
-                        file_entries = index_doc_file(file_path)
-                        entries.extend(file_entries)
-
-                if entries:
-                    _upsert_entries(db, entries, "docs")
-                    click.echo(f"  Indexed {len(entries)} document chunks")
-            elif not to_delete:
-                click.echo("  All docs up to date")
-        else:
-            click.echo("  No documents found")
-
+    # Index code from changed files
     if index_type in ("all", "code"):
-        # Get currently indexed code files
-        indexed_code = {} if clear else db.get_indexed_files("code")
+        code_extensions = {".py", ".ts", ".tsx", ".js", ".jsx", ".vue", ".dart"}
+        code_files = [f for f in changed_file_paths if f.suffix in code_extensions]
+        if code_files:
+            entries = []
+            by_type: dict[str, int] = {}
+            for file_path in code_files:
+                file_entries = index_code_file(file_path)
+                for entry in file_entries:
+                    entry.status = "ephemeral"
+                    entry.branch = current_branch
+                    entries.append(entry)
+                    by_type[entry.symbol_type] = by_type.get(entry.symbol_type, 0) + 1
 
-        # Build exclusion list for code
-        code_exclude = list(config.code.exclude)
-        for docs_path in config.docs.paths:
-            code_exclude.append(f"**/{docs_path}/**")
-
-        # Discover all code files
-        all_code_files = []
-        for code_path_str in config.code.paths:
-            code_root = path / code_path_str
-            if not code_root.exists():
-                click.echo(f"  Code path {code_root} not found, skipping...")
-                continue
-            files = discover_code_files(
-                code_root,
-                languages=config.code.languages,
-                exclude=code_exclude,
-            )
-            all_code_files.extend(files)
-
-        if all_code_files or indexed_code:
-            # Determine what needs processing
-            to_index, to_delete = _get_files_to_process(all_code_files, indexed_code)
-
-            click.echo(f"Found {len(all_code_files)} code files")
-            if not clear:
-                unchanged = len(all_code_files) - len(to_index)
-                if unchanged > 0:
-                    click.echo(f"  {unchanged} unchanged, {len(to_index)} to index")
-                if to_delete:
-                    click.echo(f"  {len(to_delete)} to remove (deleted from disk)")
-
-            # Delete removed files
-            if to_delete:
-                db.delete_by_file(to_delete, "code")
-
-            # Index new/changed files
-            if to_index:
-                entries = []
-                by_type = {}
-                with click.progressbar(
-                    to_index,
-                    label="  Parsing",
-                    show_percent=True,
-                    show_pos=True,
-                    item_show_func=lambda f: f.name[:30] if f else "",
-                ) as files:
-                    for file_path in files:
-                        file_entries = index_code_file(file_path)
-                        for entry in file_entries:
-                            entries.append(entry)
-                            by_type[entry.symbol_type] = by_type.get(entry.symbol_type, 0) + 1
-
-                if entries:
-                    click.echo(f"  Found {len(entries)} symbols")
-                    _upsert_entries(db, entries, "code")
-                    click.echo(f"  Indexed {len(entries)} code symbols")
-                    breakdown = ", ".join(f"{count} {typ}s" for typ, count in sorted(by_type.items()))
-                    click.echo(f"    ({breakdown})")
-            elif not to_delete:
-                click.echo("  All code up to date")
-        else:
-            click.echo("  No code files found")
+            if entries:
+                _upsert_entries(db, entries, "code")
+                click.echo(f"  Indexed {len(entries)} code symbols (ephemeral)")
+                breakdown = ", ".join(f"{count} {typ}s" for typ, count in sorted(by_type.items()))
+                click.echo(f"    ({breakdown})")
 
     stats = db.stats()
+    ephemeral = db.get_ephemeral_stats()
+    permanent_count = stats['total'] - ephemeral['total']
     click.echo(f"\nIndex stats: {stats['total']} total ({stats['docs']} docs, {stats['code']} code)")
+    click.echo(f"  Permanent: {permanent_count}, Ephemeral: {ephemeral['total']}")
+    if ephemeral['by_branch']:
+        branches = ", ".join(f"{b}: {c}" for b, c in ephemeral['by_branch'].items())
+        click.echo(f"  Ephemeral by branch: {branches}")
 
 
 @main.command()
@@ -673,13 +851,45 @@ def search(query: str, path: Path, type_filter: str, namespace: str,
         score = 1 - distance if distance else None
 
         click.echo(f"\n{'─' * 60}")
-        click.echo(f"[{i}] {meta.get('file', 'unknown')}")
-        click.echo(f"    Type: {meta.get('type')} | Namespace: {meta.get('namespace', '-')}")
+
+        # Build location string with line number for code
+        file_path = meta.get('file', 'unknown')
+        line_num = meta.get('line')
+        if line_num:
+            location = f"{file_path}:{line_num}"
+        else:
+            location = file_path
+
+        click.echo(f"[{i}] {location}")
+
+        # Show symbol info for code, section info for docs
+        result_type = meta.get('type')
+        if result_type == "code":
+            symbol = meta.get('symbol_name', '')
+            symbol_type = meta.get('symbol_type', '')
+            status = meta.get('status', '')
+            info_parts = [f"Type: {result_type}"]
+            if symbol:
+                info_parts.append(f"{symbol_type}: {symbol}")
+            if status:
+                info_parts.append(f"Status: {status}")
+            click.echo(f"    {' | '.join(info_parts)}")
+        else:
+            section = meta.get('section_path', '')
+            result_namespace = meta.get('namespace', '-')
+            status = meta.get('status', '')
+            info_parts = [f"Type: {result_type}", f"Namespace: {result_namespace}"]
+            if section:
+                info_parts.append(f"Section: {section}")
+            if status:
+                info_parts.append(f"Status: {status}")
+            click.echo(f"    {' | '.join(info_parts)}")
+
         if score:
             click.echo(f"    Score: {score:.3f}")
 
         if verbose:
-            click.echo(f"\n{result['content'][:500]}...")
+            click.echo(f"\n{result['content']}")
         else:
             preview = result["content"][:150].replace("\n", " ")
             click.echo(f"    {preview}...")
@@ -688,14 +898,42 @@ def search(query: str, path: Path, type_filter: str, namespace: str,
 @main.command()
 @click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
 def stats(path: Path):
-    """Show index statistics."""
+    """Show index statistics including worktree and ephemeral/permanent breakdown."""
     path = Path(path).resolve()
     db = get_db(path)
+    main_repo = get_main_repo_path(path)
 
+    # Worktree info
+    if is_worktree(path):
+        click.echo(f"Worktree: {path}")
+        click.echo(f"Main repo: {main_repo}")
+    else:
+        click.echo(f"Repository: {path}")
+
+    worktrees = list_worktrees(path)
+    if len(worktrees) > 1:
+        click.echo(f"Worktrees: {len(worktrees)}")
+        for wt in worktrees:
+            branch = wt.get("branch", "detached")
+            click.echo(f"  • {wt['path']} ({branch})")
+
+    click.echo("")
+
+    # Index stats
     s = db.stats()
+    ephemeral = db.get_ephemeral_stats()
+    permanent_count = s['total'] - ephemeral['total']
+
     click.echo(f"Total indexed: {s['total']}")
     click.echo(f"  Docs: {s['docs']}")
     click.echo(f"  Code: {s['code']}")
+    click.echo(f"\nPermanent: {permanent_count}")
+    click.echo(f"Ephemeral: {ephemeral['total']}")
+
+    if ephemeral['by_branch']:
+        click.echo("  By branch:")
+        for branch, count in ephemeral['by_branch'].items():
+            click.echo(f"    • {branch}: {count}")
 
 
 @main.command()
@@ -981,6 +1219,10 @@ def check_conventions(path: Path, files: str, branch: str, event_file: Path,
 
     Used by pre-PR hooks to check code against team conventions.
 
+    IMPORTANT: Conventions are read from origin/main (not working tree) to prevent
+    PRs from adding conventions that match their own code. Only merged conventions
+    are enforced.
+
     By default, returns only conventions RELEVANT to the changed files (semantic search).
     Use --all to return ALL conventions (useful for AI workflows that analyze edge cases).
 
@@ -1041,25 +1283,61 @@ def check_conventions(path: Path, files: str, branch: str, event_file: Path,
         "changed_files": changed_files,
     }
 
-    # Read convention files from config
+    # Read convention files from origin/main (not working tree) to prevent gaming
+    main_ref = get_main_ref(path)
+    modified_conventions = []
+
     for conv_file in config.conventions.files:
         conv_path = path / conv_file
-        if conv_path.exists():
+        conv_str = str(conv_file)
+
+        # Try to read from origin/main first
+        content = git_show_file(path, main_ref, conv_str)
+
+        if content:
+            conventions_data["files"].append({
+                "path": conv_str,
+                "content": content,
+                "source": main_ref,
+            })
+            # Check if modified locally
+            if conv_path.exists():
+                local_content = conv_path.read_text()
+                if local_content != content:
+                    modified_conventions.append(conv_str)
+        elif conv_path.exists():
+            # Fall back to working tree if not in main (new convention file)
             if conv_path.is_file():
                 content = conv_path.read_text()
                 conventions_data["files"].append({
-                    "path": str(conv_file),
+                    "path": conv_str,
                     "content": content,
+                    "source": "working_tree",
+                    "warning": "Not in main - will not be enforced until merged",
                 })
             elif conv_path.is_dir():
-                # If it's a directory, read all files in it
                 for f in conv_path.rglob("*"):
                     if f.is_file() and f.suffix in (".md", ".txt", ".yaml", ".yml"):
-                        content = f.read_text()
-                        conventions_data["files"].append({
-                            "path": str(f.relative_to(path)),
-                            "content": content,
-                        })
+                        rel_path = str(f.relative_to(path))
+                        content = git_show_file(path, main_ref, rel_path)
+                        if content:
+                            conventions_data["files"].append({
+                                "path": rel_path,
+                                "content": content,
+                                "source": main_ref,
+                            })
+                        else:
+                            conventions_data["files"].append({
+                                "path": rel_path,
+                                "content": f.read_text(),
+                                "source": "working_tree",
+                                "warning": "Not in main",
+                            })
+
+    if modified_conventions and not json_output:
+        click.echo(f"⚠ Convention files modified locally (using {main_ref} version):")
+        for f in modified_conventions:
+            click.echo(f"  • {f}")
 
     # Search memories for conventions
     if include_memories and config.conventions.also_search_memories:
@@ -1106,9 +1384,10 @@ def check_conventions(path: Path, files: str, branch: str, event_file: Path,
                 query = f"conventions patterns rules standards for {' '.join(search_terms)}"
 
                 # Search both namespaces using the db directly
+                # Only search "permanent" entries to prevent gaming via branch conventions
                 seen_ids = set()
                 for ns in ["team", "app"]:
-                    results = db.search(query, namespace=ns, limit=50)
+                    results = db.search(query, namespace=ns, status="permanent", limit=50)
                     for result in results:
                         meta = result.get("metadata", {})
                         result_type = meta.get("type", "")
@@ -2015,11 +2294,15 @@ def setup_ghp(remove: bool):
 @click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
 @click.option("--quiet", "-q", is_flag=True, help="Suppress output (for automated runs)")
 @click.option("--auto-prune", is_flag=True, help="Automatically prune stale synced branches")
-def sync(path: Path, quiet: bool, auto_prune: bool):
-    """Sync memories from all remote branches.
+@click.option("--no-reindex", is_flag=True, help="Skip reindexing from main")
+def sync(path: Path, quiet: bool, auto_prune: bool, no_reindex: bool):
+    """Sync memories from all remote branches and reindex from main.
 
     Fetches .ragtime/branches/* from remote branches and copies to
     local dot-prefixed folders (e.g., .feature-branch/).
+
+    Also reindexes code and docs from origin/main as "permanent" embeddings,
+    used for convention checks and as the baseline for search.
     """
     import shutil
 
@@ -2123,7 +2406,114 @@ def sync(path: Path, quiet: bool, auto_prune: bool):
                 click.echo(f"✓ Pruned {len(stale)} stale branches")
 
     if not quiet:
-        click.echo(f"\nDone. Synced {synced} branches.")
+        click.echo(f"\nSynced {synced} branches.")
+
+    # Reindex from origin/main as permanent
+    if not no_reindex:
+        _sync_permanent_index(path, quiet)
+
+    if not quiet:
+        click.echo("\nDone.")
+
+
+def _sync_permanent_index(path: Path, quiet: bool):
+    """Reindex code and docs from origin/main as permanent embeddings."""
+    main_ref = get_main_ref(path)
+    db = get_db(path)
+    config = RagtimeConfig.load(path)
+
+    if not quiet:
+        click.echo(f"\nReindexing from {main_ref}...")
+
+    # Clear existing permanent entries
+    cleared = db.clear_permanent()
+    if not quiet and cleared > 0:
+        click.echo(f"  Cleared {cleared} existing permanent entries")
+
+    # Get file patterns for code
+    code_extensions = []
+    for lang in config.code.languages:
+        if lang == "python":
+            code_extensions.append("*.py")
+        elif lang == "typescript":
+            code_extensions.extend(["*.ts", "*.tsx"])
+        elif lang == "javascript":
+            code_extensions.extend(["*.js", "*.jsx"])
+        elif lang == "vue":
+            code_extensions.append("*.vue")
+        elif lang == "dart":
+            code_extensions.append("*.dart")
+
+    # List all files from main ref
+    all_files = git_ls_files(path, main_ref)
+    if not all_files:
+        if not quiet:
+            click.echo("  No files found in main ref")
+        return
+
+    # Filter to configured paths
+    code_paths = [str(p) for p in config.code.paths]
+    doc_paths = [str(p) for p in config.docs.paths]
+
+    code_entries = []
+    doc_entries = []
+
+    for file_path in all_files:
+        # Skip excluded patterns
+        skip = False
+        for exclude in config.code.exclude + config.docs.exclude:
+            if fnmatch(file_path, exclude):
+                skip = True
+                break
+        if skip:
+            continue
+
+        # Check if it's a code file
+        is_code = False
+        for ext in code_extensions:
+            if fnmatch(file_path, f"**/{ext}") or fnmatch(file_path, ext):
+                is_code = True
+                break
+
+        # Check if in configured paths (handle "." as meaning all files)
+        in_code_path = (
+            not code_paths or
+            "." in code_paths or
+            any(file_path.startswith(p) for p in code_paths if p != ".")
+        )
+        in_doc_path = (
+            not doc_paths or
+            "." in doc_paths or
+            any(file_path.startswith(p) for p in doc_paths if p != ".")
+        )
+
+        if is_code and in_code_path:
+            content = git_show_file(path, main_ref, file_path)
+            if content:
+                entries = index_code_content(file_path, content, status="permanent")
+                code_entries.extend(entries)
+        elif file_path.endswith(".md") and in_doc_path:
+            content = git_show_file(path, main_ref, file_path)
+            if content:
+                entries = index_doc_content(file_path, content, status="permanent")
+                doc_entries.extend(entries)
+
+    # Batch insert entries
+    if code_entries:
+        _upsert_entries(db, code_entries, "code", label="  Indexing code")
+        if not quiet:
+            click.echo(f"  Indexed {len(code_entries)} code symbols as permanent")
+
+    if doc_entries:
+        _upsert_entries(db, doc_entries, "docs", label="  Indexing docs")
+        if not quiet:
+            click.echo(f"  Indexed {len(doc_entries)} doc chunks as permanent")
+
+    # Show final stats
+    if not quiet:
+        stats = db.stats()
+        ephemeral = db.get_ephemeral_stats()
+        click.echo(f"  Total: {stats['total']} ({ephemeral['total']} ephemeral)")
 
 
 @main.command()

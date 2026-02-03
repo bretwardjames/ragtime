@@ -146,6 +146,7 @@ class RagtimeDB:
         limit: int = 10,
         type_filter: str | None = None,
         namespace: str | None = None,
+        status: str | list[str] | None = None,
         require_terms: list[str] | None = None,
         auto_extract: bool = True,
         **filters,
@@ -158,6 +159,9 @@ class RagtimeDB:
             limit: Max results to return
             type_filter: "code" or "docs" (None = both)
             namespace: Filter by namespace (for docs)
+            status: Filter by status - "ephemeral", "permanent", or list of both.
+                   None means no filtering (returns all). For convention checks,
+                   use status="permanent" to only match merged code.
             require_terms: List of terms that MUST appear in results (case-insensitive).
                           Use for scoped queries like "error handling in mobile" with
                           require_terms=["mobile"] to ensure "mobile" isn't ignored.
@@ -189,6 +193,12 @@ class RagtimeDB:
 
         if namespace:
             conditions.append({"namespace": namespace})
+
+        if status:
+            if isinstance(status, list):
+                conditions.append({"status": {"$in": status}})
+            else:
+                conditions.append({"status": status})
 
         # Add any additional filters, but skip None values
         for key, value in filters.items():
@@ -449,3 +459,109 @@ class RagtimeDB:
             self.collection.delete(ids=ids)
 
         return len(ids)
+
+    def delete_by_branch(self, branch: str) -> int:
+        """
+        Delete all ephemeral entries for a branch.
+
+        Used when a branch is deleted or merged.
+
+        Args:
+            branch: Branch name to remove entries for
+
+        Returns:
+            Number of entries deleted
+        """
+        where = {"$and": [{"status": "ephemeral"}, {"branch": branch}]}
+        results = self.collection.get(where=where)
+        ids = results["ids"]
+
+        if ids:
+            self.collection.delete(ids=ids)
+
+        return len(ids)
+
+    def graduate_branch(self, branch: str) -> int:
+        """
+        Graduate ephemeral entries from a branch to permanent.
+
+        Called after PR merge. Updates status without re-embedding.
+
+        Args:
+            branch: Branch name to graduate
+
+        Returns:
+            Number of entries graduated
+        """
+        where = {"$and": [{"status": "ephemeral"}, {"branch": branch}]}
+        results = self.collection.get(where=where, include=["metadatas", "documents"])
+
+        if not results["ids"]:
+            return 0
+
+        # Update metadata to permanent
+        new_metadatas = []
+        for meta in results["metadatas"]:
+            updated = dict(meta)
+            updated["status"] = "permanent"
+            # Remove branch key entirely (ChromaDB doesn't support None values)
+            if "branch" in updated:
+                del updated["branch"]
+            new_metadatas.append(updated)
+
+        self.collection.update(
+            ids=results["ids"],
+            metadatas=new_metadatas,
+        )
+
+        return len(results["ids"])
+
+    def clear_permanent(self, type_filter: str | None = None) -> int:
+        """
+        Clear all permanent entries (before reindexing from main).
+
+        Args:
+            type_filter: Only clear "code" or "docs" (None = both)
+
+        Returns:
+            Number of entries cleared
+        """
+        conditions = [{"status": "permanent"}]
+        if type_filter:
+            conditions.append({"type": type_filter})
+
+        where = {"$and": conditions} if len(conditions) > 1 else conditions[0]
+        results = self.collection.get(where=where)
+        ids = results["ids"]
+
+        if ids:
+            self.collection.delete(ids=ids)
+
+        return len(ids)
+
+    def get_ephemeral_stats(self, branch: str | None = None) -> dict:
+        """
+        Get statistics about ephemeral entries.
+
+        Args:
+            branch: Optional branch to filter by
+
+        Returns:
+            Dict with counts by branch
+        """
+        where = {"status": "ephemeral"}
+        if branch:
+            where = {"$and": [{"status": "ephemeral"}, {"branch": branch}]}
+
+        results = self.collection.get(where=where, include=["metadatas"])
+
+        # Count by branch
+        by_branch: dict[str, int] = {}
+        for meta in results["metadatas"]:
+            b = meta.get("branch", "unknown")
+            by_branch[b] = by_branch.get(b, 0) + 1
+
+        return {
+            "total": len(results["ids"]),
+            "by_branch": by_branch,
+        }

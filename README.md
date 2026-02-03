@@ -11,8 +11,10 @@ Local-first memory and RAG system for Claude Code. Semantic search over code, do
 - **Memory Storage**: Store structured knowledge with namespaces, types, and metadata
 - **Semantic Search**: Query memories, docs, and code with natural language
 - **Code Indexing**: Index functions, classes, and composables from Python, TypeScript, Vue, and Dart
+- **Ephemeral/Permanent Embeddings**: Two-database model prevents convention gaming
 - **Cross-Branch Sync**: Share context with teammates before PRs merge
-- **Convention Checking**: Verify code follows team standards before PRs
+- **Worktree Support**: All git worktrees share the same index
+- **Convention Checking**: Verify code follows team standards (uses only merged code)
 - **Doc Generation**: Generate documentation from code (stubs or AI-powered)
 - **Debug Tools**: Verify index integrity, inspect similarity scores
 - **MCP Server**: Native Claude Code integration
@@ -76,23 +78,25 @@ ragtime forget <memory-id>
 
 ### Search & Indexing
 
+Ragtime uses a two-database model for embeddings:
+- **Permanent**: Indexed from `origin/main` - used for convention checks
+- **Ephemeral**: Your local changes - searchable but not used for convention enforcement
+
 ```bash
-# Index everything (docs + code)
+# Sync permanent embeddings from origin/main
+ragtime sync
+
+# Index local changes as ephemeral
 ragtime index
 
-# Incremental index (only changed files - fast!)
-ragtime index  # ~8 seconds vs ~5 minutes for unchanged codebases
-
-# Index only docs
+# Index only docs or code
 ragtime index --type docs
-
-# Index only code (functions, classes, composables)
 ragtime index --type code
 
-# Full re-index (removes old entries, recomputes all embeddings)
-ragtime index --clear
+# View index stats (shows permanent vs ephemeral breakdown)
+ragtime stats
 
-# Semantic search across all content
+# Semantic search across all content (sees both permanent and ephemeral)
 ragtime search "how does auth work" --limit 10
 
 # Search only code
@@ -152,8 +156,11 @@ ragtime debug verify
 ### Cross-Branch Sync
 
 ```bash
-# Sync all teammate branch memories
+# Sync all teammate branch memories AND reindex from origin/main
 ragtime sync
+
+# Skip reindexing (just sync branch memories)
+ragtime sync --no-reindex
 
 # Auto-prune stale synced folders
 ragtime sync --auto-prune
@@ -162,6 +169,10 @@ ragtime sync --auto-prune
 ragtime prune --dry-run
 ragtime prune
 ```
+
+The `sync` command does two things:
+1. Fetches `.ragtime/branches/*` from remote branches
+2. Reindexes code/docs from `origin/main` as "permanent" embeddings
 
 ### Daemon (Auto-Sync)
 
@@ -209,7 +220,11 @@ ragtime setup-ghp
 │   └── .{branch-slug}/      # Synced from teammates (gitignored, dot-prefix)
 ├── archive/branches/        # Archived completed branches (tracked)
 └── index/                   # ChromaDB vector store (gitignored)
+    ├── permanent entries    # From origin/main (convention checks)
+    └── ephemeral entries    # From local changes (tagged by branch)
 ```
+
+The `index/` directory is shared across all git worktrees.
 
 ## Configuration
 
@@ -234,6 +249,46 @@ conventions:
   folder: ".ragtime/conventions/"
   scan_docs_for_sections: ["docs/"]
 ```
+
+## Ephemeral vs Permanent Embeddings
+
+Ragtime maintains two logical databases to prevent convention gaming:
+
+| Type | Source | Used For | Updated By |
+|------|--------|----------|------------|
+| **Permanent** | `origin/main` | Convention checks, baseline search | `ragtime sync` |
+| **Ephemeral** | Local changes | Search (alongside permanent) | `ragtime index` |
+
+### Why Two Databases?
+
+Without this model, a PR could add conventions that match its own code, effectively bypassing convention checks. By reading conventions only from `origin/main`:
+
+- New conventions must be merged before they're enforced
+- Local changes are still searchable during development
+- Convention checks use the authoritative merged codebase
+
+### Workflow
+
+```bash
+# After pulling from main, sync permanent embeddings
+ragtime sync
+
+# After making local changes, index as ephemeral
+ragtime index
+
+# Search sees both - your changes and the baseline
+ragtime search "my new function"
+
+# Convention checks only use permanent (merged) code
+ragtime check-conventions
+```
+
+### Worktree Support
+
+All git worktrees share the same `.ragtime/index` directory, so:
+- Permanent embeddings are shared across worktrees
+- Each worktree's ephemeral entries are tagged with its branch name
+- Switching worktrees doesn't require re-syncing
 
 ## How Search Works
 
@@ -404,6 +459,8 @@ search("error handling", require_terms=["mobile", "dart"])  # Hybrid filtering
 ragtime check-conventions          # Filtered to changed files
 ragtime check-conventions --all    # All conventions (for AI analysis)
 ```
+
+Convention checks read from `origin/main` to prevent gaming - new conventions must be merged before they're enforced.
 
 **Handoff Context**: Save session state for continuity:
 ```
