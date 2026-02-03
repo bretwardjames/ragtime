@@ -2674,9 +2674,9 @@ def daemon_start(path: Path, interval: str):
                 capture_output=True,
             )
 
-            # Sync
+            # Sync (skip reindex - that's expensive and only needed after pulls)
             subprocess.run(
-                ["ragtime", "sync", "--quiet", "--auto-prune"],
+                ["ragtime", "sync", "--quiet", "--auto-prune", "--no-reindex"],
                 cwd=path,
                 capture_output=True,
             )
