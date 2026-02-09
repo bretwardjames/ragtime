@@ -16,6 +16,7 @@ Local-first memory and RAG system for Claude Code. Semantic search over code, do
 - **Worktree Support**: All git worktrees share the same index
 - **Convention Checking**: Verify code follows team standards (uses only merged code)
 - **Doc Generation**: Generate documentation from code (stubs or AI-powered)
+- **Narrative Retrieval**: Full-document retrieval preserving context and decisions
 - **Debug Tools**: Verify index integrity, inspect similarity scores
 - **MCP Server**: Native Claude Code integration
 - **Usage Documentation**: Guidance for integrating ragtime into AI workflows
@@ -134,10 +135,23 @@ ragtime generate src/ --stubs -l python
 ragtime generate src/ --stubs --include-private
 ```
 
+### Narrative Retrieval
+
+```bash
+# View the narrative manifest index
+ragtime narrative show
+
+# Debug: which manifest entries match a query
+ragtime narrative match "authentication flow"
+
+# Force rebuild the manifest (normally auto-maintained)
+ragtime narrative rebuild
+```
+
 ### Debug & Verification
 
 ```bash
-# Debug a search query (show similarity scores)
+# Debug a search query (show similarity scores and retrieval method)
 ragtime debug search "authentication"
 ragtime debug search "auth" --show-vectors
 
@@ -209,6 +223,7 @@ ragtime setup-ghp
 .ragtime/
 ├── config.yaml              # Configuration
 ├── CONVENTIONS.md           # Team rules (checked by /create-pr)
+├── narrative-index.md       # Narrative manifest (auto-maintained, human-editable)
 ├── app/{component}/         # Graduated app knowledge (tracked)
 │   └── {id}-{slug}.md
 ├── team/                    # Team conventions (tracked)
@@ -248,6 +263,13 @@ conventions:
   default_file: ".ragtime/CONVENTIONS.md"
   folder: ".ragtime/conventions/"
   scan_docs_for_sections: ["docs/"]
+
+narrative:
+  enabled: false                         # Enable narrative retrieval
+  index_file: .ragtime/narrative-index.md  # Human-readable manifest
+  serve_full_docs: true                  # Return full docs vs summaries
+  max_doc_tokens: 2000                   # Skip full-doc for very large files
+  fallback_to_vector: true               # Vector search when no manifest match
 ```
 
 ## Ephemeral vs Permanent Embeddings
@@ -330,6 +352,48 @@ Tiered search returns results in priority order:
 1. **Memories** - Curated, high-signal knowledge
 2. **Documentation** - Indexed markdown files
 3. **Code** - Function signatures and symbols
+
+### Narrative Retrieval
+
+Traditional vector search returns decontextualized chunks. Narrative retrieval serves **full documents** instead, preserving the rationale, invariants, and decisions that make knowledge actionable.
+
+Enable it in `.ragtime/config.yaml`:
+
+```yaml
+narrative:
+  enabled: true
+```
+
+When enabled, search consults a manifest index first (a lightweight table of contents with scope summaries), returns full documents for matches, and falls back to vector search for everything else. Both layers work simultaneously — narrative results come first, vector fills remaining slots.
+
+You can use narrative exclusively by setting `fallback_to_vector: false` — only manifest-matched documents will be returned, with no vector search. This is useful when you want tight control over what knowledge gets served.
+
+```bash
+# Manage the narrative index
+ragtime narrative show             # View manifest entries
+ragtime narrative match "auth"     # Debug: which entries match a query
+ragtime narrative rebuild          # Force full rebuild
+
+# The index auto-updates during normal workflows
+ragtime index    # Updates manifest after indexing
+ragtime sync     # Updates manifest after syncing
+```
+
+Each result is tagged with its retrieval method (`narrative` or `vector`) so you can see which layer provided it.
+
+**Writing better narrative docs**: Add optional `scope` and `trigger` fields to your memory frontmatter for precise routing:
+
+```yaml
+---
+namespace: app
+type: architecture
+component: auth
+scope: "OAuth2 implementation, token refresh strategy, session management"
+trigger: "Read before touching anything in src/auth/"
+---
+```
+
+Without these fields, ragtime auto-generates scope summaries from frontmatter + first paragraph.
 
 ### Hybrid Search
 

@@ -360,6 +360,83 @@ class RagtimeDB:
                 r["tier"] = tier_name
             return results
 
+    def search_narrative(
+        self,
+        query: str,
+        project_path: "Path",
+        narrative_config: "NarrativeConfig",
+        limit: int = 10,
+        **vector_kwargs,
+    ) -> list[dict]:
+        """
+        Narrative search: manifest routing first, vector fallback.
+
+        Consults the narrative manifest index for full-document matches,
+        then fills remaining slots with vector search if configured.
+
+        Args:
+            query: Natural language search query
+            project_path: Root of the project (for reading docs)
+            narrative_config: Narrative configuration
+            limit: Max total results
+            **vector_kwargs: Passed through to vector search() for fallback
+
+        Returns:
+            List of result dicts with 'retrieval_method' field
+        """
+        from .narrative import parse_manifest, match_query, read_full_doc
+
+        results = []
+        manifest_path = project_path / narrative_config.index_file
+
+        # Layer 1: Manifest matching
+        if manifest_path.exists():
+            try:
+                manifest_content = manifest_path.read_text()
+                entries = parse_manifest(manifest_content)
+                matches = match_query(query, entries, max_matches=min(limit, 3))
+
+                for entry in matches:
+                    if narrative_config.serve_full_docs:
+                        content = read_full_doc(
+                            project_path, entry.file_path,
+                            max_tokens=narrative_config.max_doc_tokens,
+                        )
+                    else:
+                        content = entry.scope
+
+                    if content:
+                        results.append({
+                            "content": content,
+                            "metadata": {
+                                "file": entry.file_path,
+                                "type": "docs",
+                                "narrative_scope": entry.scope,
+                            },
+                            "distance": 0.0,
+                            "retrieval_method": "narrative",
+                        })
+
+                    if len(results) >= limit:
+                        break
+            except (IOError, UnicodeDecodeError):
+                pass
+
+        # Layer 2: Vector fallback
+        remaining = limit - len(results)
+        if remaining > 0 and narrative_config.fallback_to_vector:
+            vector_results = self.search(query=query, limit=remaining, **vector_kwargs)
+            # Dedupe: skip vector results for files already in narrative results
+            narrative_files = {r["metadata"].get("file") for r in results}
+            for r in vector_results:
+                if r["metadata"].get("file") not in narrative_files:
+                    r["retrieval_method"] = "vector"
+                    results.append(r)
+                    if len(results) >= limit:
+                        break
+
+        return results
+
     def delete(self, ids: list[str]) -> None:
         """Delete documents by ID."""
         self.collection.delete(ids=ids)

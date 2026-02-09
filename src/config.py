@@ -67,11 +67,22 @@ class ConventionsConfig:
 
 
 @dataclass
+class NarrativeConfig:
+    """Configuration for narrative retrieval strategy."""
+    enabled: bool = False
+    index_file: str = ".ragtime/narrative-index.md"
+    serve_full_docs: bool = True
+    max_doc_tokens: int = 2000  # Skip full-doc serving for very large files
+    fallback_to_vector: bool = True  # When no manifest match, use vector search
+
+
+@dataclass
 class RagtimeConfig:
     """Main ragtime configuration."""
     docs: DocsConfig = field(default_factory=DocsConfig)
     code: CodeConfig = field(default_factory=CodeConfig)
     conventions: ConventionsConfig = field(default_factory=ConventionsConfig)
+    narrative: NarrativeConfig = field(default_factory=NarrativeConfig)
 
     @classmethod
     def load(cls, project_path: Path) -> "RagtimeConfig":
@@ -90,6 +101,7 @@ class RagtimeConfig:
         docs_data = data.get("docs", {})
         code_data = data.get("code", {})
         conventions_data = data.get("conventions", {})
+        narrative_data = data.get("narrative", {})
 
         return cls(
             docs=DocsConfig(
@@ -113,6 +125,13 @@ class RagtimeConfig:
                 scan_docs_for_sections=conventions_data.get(
                     "scan_docs_for_sections", ConventionsConfig().scan_docs_for_sections
                 ),
+            ),
+            narrative=NarrativeConfig(
+                enabled=narrative_data.get("enabled", NarrativeConfig().enabled),
+                index_file=narrative_data.get("index_file", NarrativeConfig().index_file),
+                serve_full_docs=narrative_data.get("serve_full_docs", NarrativeConfig().serve_full_docs),
+                max_doc_tokens=narrative_data.get("max_doc_tokens", NarrativeConfig().max_doc_tokens),
+                fallback_to_vector=narrative_data.get("fallback_to_vector", NarrativeConfig().fallback_to_vector),
             ),
         )
 
@@ -140,6 +159,13 @@ class RagtimeConfig:
                 "default_file": self.conventions.default_file,
                 "folder": self.conventions.folder,
                 "scan_docs_for_sections": self.conventions.scan_docs_for_sections,
+            },
+            "narrative": {
+                "enabled": self.narrative.enabled,
+                "index_file": self.narrative.index_file,
+                "serve_full_docs": self.narrative.serve_full_docs,
+                "max_doc_tokens": self.narrative.max_doc_tokens,
+                "fallback_to_vector": self.narrative.fallback_to_vector,
             },
         }
 

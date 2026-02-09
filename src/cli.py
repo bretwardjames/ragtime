@@ -18,6 +18,7 @@ from .indexers import (
     discover_code_files, index_code_file, CodeEntry, index_code_content,
 )
 from .memory import Memory, MemoryStore
+from .narrative import update_manifest, parse_manifest, match_query, read_full_doc
 
 
 def get_git_common_dir(path: Path) -> Path:
@@ -804,6 +805,11 @@ def index(path: Path, index_type: str, clear: bool):
         branches = ", ".join(f"{b}: {c}" for b, c in ephemeral['by_branch'].items())
         click.echo(f"  Ephemeral by branch: {branches}")
 
+    # Update narrative manifest if enabled
+    if config.narrative.enabled:
+        count = update_manifest(path, config.narrative.index_file, config.docs.paths)
+        click.echo(f"  Narrative index: {count} entries")
+
 
 @main.command()
 @click.argument("query")
@@ -829,17 +835,30 @@ def search(query: str, path: Path, type_filter: str, namespace: str,
     """
     path = Path(path).resolve()
     db = get_db(path)
+    config = RagtimeConfig.load(path)
 
     type_arg = None if type_filter == "all" else type_filter
 
-    results = db.search(
-        query=query,
-        limit=limit,
-        type_filter=type_arg,
-        namespace=namespace,
-        require_terms=list(require_terms) if require_terms else None,
-        auto_extract=not raw,
-    )
+    if config.narrative.enabled and not raw:
+        results = db.search_narrative(
+            query=query,
+            project_path=path,
+            narrative_config=config.narrative,
+            limit=limit,
+            type_filter=type_arg,
+            namespace=namespace,
+            require_terms=list(require_terms) if require_terms else None,
+            auto_extract=True,
+        )
+    else:
+        results = db.search(
+            query=query,
+            limit=limit,
+            type_filter=type_arg,
+            namespace=namespace,
+            require_terms=list(require_terms) if require_terms else None,
+            auto_extract=not raw,
+        )
 
     if not results:
         click.echo("No results found.")
@@ -849,6 +868,7 @@ def search(query: str, path: Path, type_filter: str, namespace: str,
         meta = result["metadata"]
         distance = result["distance"]
         score = 1 - distance if distance else None
+        retrieval = result.get("retrieval_method", "vector")
 
         click.echo(f"\n{'─' * 60}")
 
@@ -887,6 +907,9 @@ def search(query: str, path: Path, type_filter: str, namespace: str,
 
         if score:
             click.echo(f"    Score: {score:.3f}")
+
+        if retrieval == "narrative":
+            click.echo(f"    Via: narrative (full doc)")
 
         if verbose:
             click.echo(f"\n{result['content']}")
@@ -935,6 +958,17 @@ def stats(path: Path):
         for branch, count in ephemeral['by_branch'].items():
             click.echo(f"    • {branch}: {count}")
 
+    # Narrative info
+    config = RagtimeConfig.load(path)
+    if config.narrative.enabled:
+        manifest_path = path / config.narrative.index_file
+        if manifest_path.exists():
+            entries = parse_manifest(manifest_path.read_text())
+            click.echo(f"\nNarrative: enabled ({len(entries)} entries)")
+            click.echo(f"  Index: {config.narrative.index_file}")
+        else:
+            click.echo(f"\nNarrative: enabled (no index yet — run 'ragtime index' or 'ragtime narrative rebuild')")
+
 
 @main.command()
 @click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
@@ -971,6 +1005,12 @@ def config(path: Path):
     click.echo("\nConventions:")
     click.echo(f"  Files: {cfg.conventions.files}")
     click.echo(f"  Also search memories: {cfg.conventions.also_search_memories}")
+    click.echo("\nNarrative:")
+    click.echo(f"  Enabled: {cfg.narrative.enabled}")
+    click.echo(f"  Index file: {cfg.narrative.index_file}")
+    click.echo(f"  Serve full docs: {cfg.narrative.serve_full_docs}")
+    click.echo(f"  Max doc tokens: {cfg.narrative.max_doc_tokens}")
+    click.echo(f"  Fallback to vector: {cfg.narrative.fallback_to_vector}")
 
 
 # ============================================================================
@@ -2072,6 +2112,13 @@ mcp__ragtime__search(query="error handling", namespace="team", type="convention"
 mcp__ragtime__search(query="how does auth work in mobile", tiered=true)
 ```
 
+### Narrative Retrieval
+
+When `narrative.enabled: true` in config, search serves full documents for
+matching topics (preserving context and decisions) and falls back to vector
+search for everything else. Results include `retrieval_method` ("narrative"
+or "vector") so you can see which layer provided each result.
+
 ### Remember Examples
 
 ```
@@ -2509,6 +2556,12 @@ def _sync_permanent_index(path: Path, quiet: bool):
         if not quiet:
             click.echo(f"  Indexed {len(doc_entries)} doc chunks as permanent")
 
+    # Update narrative manifest if enabled
+    if config.narrative.enabled:
+        count = update_manifest(path, config.narrative.index_file, config.docs.paths)
+        if not quiet:
+            click.echo(f"  Narrative index: {count} entries")
+
     # Show final stats
     if not quiet:
         stats = db.stats()
@@ -2757,6 +2810,91 @@ def daemon_status(path: Path):
 
 
 @main.group()
+def narrative():
+    """Manage narrative retrieval index."""
+    pass
+
+
+@narrative.command("rebuild")
+@click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
+def narrative_rebuild(path: Path):
+    """Force full rebuild of the narrative manifest index."""
+    path = Path(path).resolve()
+    config = RagtimeConfig.load(path)
+
+    count = update_manifest(path, config.narrative.index_file, config.docs.paths)
+    click.echo(f"Rebuilt narrative index: {count} entries")
+    click.echo(f"  File: {config.narrative.index_file}")
+
+
+@narrative.command("show")
+@click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
+def narrative_show(path: Path):
+    """Show the current narrative manifest index."""
+    path = Path(path).resolve()
+    config = RagtimeConfig.load(path)
+
+    manifest_path = path / config.narrative.index_file
+    if not manifest_path.exists():
+        click.echo("No narrative index found. Run 'ragtime narrative rebuild' or enable narrative in config.")
+        return
+
+    content = manifest_path.read_text()
+    entries = parse_manifest(content)
+
+    click.echo(f"Narrative Index ({len(entries)} entries)")
+    click.echo(f"{'─' * 60}")
+
+    for entry in entries:
+        click.echo(f"\n  {entry.file_path}")
+        click.echo(f"    Scope: {entry.scope}")
+        if entry.trigger:
+            click.echo(f"    Trigger: {entry.trigger}")
+
+
+@narrative.command("match")
+@click.argument("query")
+@click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
+def narrative_match(query: str, path: Path):
+    """Debug: show which manifest entries match a query and why."""
+    path = Path(path).resolve()
+    config = RagtimeConfig.load(path)
+
+    manifest_path = path / config.narrative.index_file
+    if not manifest_path.exists():
+        click.echo("No narrative index found.")
+        return
+
+    content = manifest_path.read_text()
+    entries = parse_manifest(content)
+    matches = match_query(query, entries)
+
+    if not matches:
+        click.echo(f"No manifest entries match: \"{query}\"")
+        return
+
+    click.echo(f"Query: \"{query}\"")
+    click.echo(f"{'─' * 60}")
+
+    for i, entry in enumerate(matches, 1):
+        click.echo(f"\n[{i}] {entry.file_path}")
+        click.echo(f"    Scope: {entry.scope}")
+
+        # Show full doc size
+        full_path = path / entry.file_path
+        if full_path.exists():
+            char_count = len(full_path.read_text())
+            approx_tokens = char_count // 4
+            click.echo(f"    Doc size: ~{approx_tokens} tokens")
+
+
+main.add_command(narrative)
+
+
+# ============================================================================
+
+
+@main.group()
 def debug():
     """Debug and verify the vector index."""
     pass
@@ -2771,24 +2909,42 @@ def debug_search(query: str, path: Path, limit: int, show_vectors: bool):
     """Debug a search query - show scores and ranking details."""
     path = Path(path).resolve()
     db = get_db(path)
+    config = RagtimeConfig.load(path)
 
-    results = db.search(query=query, limit=limit)
+    if config.narrative.enabled:
+        results = db.search_narrative(
+            query=query,
+            project_path=path,
+            narrative_config=config.narrative,
+            limit=limit,
+        )
+    else:
+        results = db.search(query=query, limit=limit)
 
     if not results:
         click.echo("No results found.")
         return
 
     click.echo(f"\nQuery: \"{query}\"")
+    if config.narrative.enabled:
+        click.echo(f"Strategy: narrative + vector fallback")
     click.echo(f"{'─' * 60}")
 
     for i, result in enumerate(results, 1):
         meta = result["metadata"]
         distance = result["distance"]
         similarity = 1 - distance if distance else None
+        retrieval = result.get("retrieval_method", "vector")
 
         click.echo(f"\n[{i}] {meta.get('file', 'unknown')}")
-        click.echo(f"    Distance: {distance:.4f}")
-        click.echo(f"    Similarity: {similarity:.4f} ({similarity * 100:.1f}%)")
+        if retrieval == "narrative":
+            click.echo(f"    Via: narrative (full doc)")
+            scope = meta.get("narrative_scope", "")
+            if scope:
+                click.echo(f"    Scope: {scope}")
+        else:
+            click.echo(f"    Distance: {distance:.4f}")
+            click.echo(f"    Similarity: {similarity:.4f} ({similarity * 100:.1f}%)")
         click.echo(f"    Namespace: {meta.get('namespace', '-')}")
         click.echo(f"    Type: {meta.get('type', '-')}")
 

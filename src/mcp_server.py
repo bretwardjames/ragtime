@@ -14,6 +14,7 @@ from typing import Any
 from .db import RagtimeDB
 from .memory import Memory, MemoryStore
 from .feedback import FeedbackStore, SearchFeedback
+from .config import RagtimeConfig
 
 
 def find_project_root(start_path: Path) -> Path:
@@ -53,6 +54,7 @@ class RagtimeMCPServer:
         self._db = None
         self._store = None
         self._feedback = None
+        self._config = None
 
     @property
     def db(self) -> RagtimeDB:
@@ -68,6 +70,13 @@ class RagtimeMCPServer:
         if self._store is None:
             self._store = MemoryStore(self.project_path, self.db)
         return self._store
+
+    @property
+    def config(self) -> RagtimeConfig:
+        """Lazy-load the config."""
+        if self._config is None:
+            self._config = RagtimeConfig.load(self.project_path)
+        return self._config
 
     @property
     def feedback(self) -> FeedbackStore:
@@ -422,7 +431,22 @@ class RagtimeMCPServer:
 
     def _search(self, args: dict) -> dict:
         """Search indexed content with smart query understanding."""
-        if args.get("tiered", False):
+        narrative_cfg = self.config.narrative
+
+        if narrative_cfg.enabled and not args.get("tiered", False):
+            # Narrative layer active — manifest routing + vector fallback
+            results = self.db.search_narrative(
+                query=args["query"],
+                project_path=self.project_path,
+                narrative_config=narrative_cfg,
+                limit=args.get("limit", 10),
+                namespace=args.get("namespace"),
+                type_filter=args.get("type"),
+                component=args.get("component"),
+                require_terms=args.get("require_terms"),
+                auto_extract=args.get("auto_extract", True),
+            )
+        elif args.get("tiered", False):
             # Tiered search: memories > docs > code
             results = self.db.search_tiered(
                 query=args["query"],
@@ -443,10 +467,13 @@ class RagtimeMCPServer:
                 auto_extract=args.get("auto_extract", True),
             )
 
-        # Apply feedback-based boosts
+        # Apply feedback-based boosts only to vector results
         boosts = self.feedback.get_boost_scores()
         if boosts:
-            results = self.feedback.apply_boosts(results, boosts)
+            narrative_results = [r for r in results if r.get("retrieval_method") == "narrative"]
+            vector_results = [r for r in results if r.get("retrieval_method") != "narrative"]
+            vector_results = self.feedback.apply_boosts(vector_results, boosts)
+            results = narrative_results + vector_results
 
         return {
             "count": len(results),
@@ -458,6 +485,7 @@ class RagtimeMCPServer:
                     "score": 1 - r["distance"] if r["distance"] else None,
                     "boosted": r.get("boosted", False),
                     "tier": r.get("tier"),  # For tiered search
+                    "retrieval_method": r.get("retrieval_method"),  # narrative | vector
                 }
                 for r in results
             ]
