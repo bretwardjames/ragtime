@@ -72,6 +72,50 @@ def extract_query_hints(query: str, known_components: list[str] | None = None) -
     return cleaned, list(set(extracted))
 
 
+def _vector_summary(result: dict) -> str:
+    """Summarize a vector search result as a pointer instead of full content.
+
+    For code: "function handleCheckIn — shift check-in handler with GPS validation"
+    For docs: "Installation > Configuration — environment variables and setup"
+    """
+    meta = result.get("metadata", {})
+    result_type = meta.get("type", "")
+    content = result.get("content", "")
+
+    if result_type == "code":
+        symbol_type = meta.get("symbol_type", "symbol")
+        symbol_name = meta.get("symbol_name", "")
+        # Use first line of content as context (usually the signature)
+        first_line = content.split("\n", 1)[0].strip()
+        if symbol_name:
+            return f"Matched {symbol_type}: {symbol_name} — {first_line}"
+        return f"Matched {symbol_type} — {first_line}"
+
+    elif result_type == "docs":
+        section = meta.get("section_path", "")
+        title = meta.get("title", "")
+        # First sentence of content as context
+        first_sentence = content.split("\n", 1)[0].strip()
+        if not first_sentence or first_sentence.startswith("#"):
+            # Skip headers, grab next non-empty line
+            for line in content.split("\n"):
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    first_sentence = line
+                    break
+        if len(first_sentence) > 120:
+            first_sentence = first_sentence[:117].rsplit(" ", 1)[0] + "..."
+        label = section or title or "doc"
+        return f"Matched doc: {label} — {first_sentence}"
+
+    else:
+        # Memory or other type
+        preview = content[:120].replace("\n", " ").strip()
+        if len(preview) == 120:
+            preview = preview.rsplit(" ", 1)[0] + "..."
+        return f"Matched {result_type}: {preview}"
+
+
 class RagtimeDB:
     """Vector database for ragtime indexes."""
 
@@ -422,7 +466,8 @@ class RagtimeDB:
             except (IOError, UnicodeDecodeError):
                 pass
 
-        # Layer 2: Vector fallback
+        # Layer 2: Vector fallback — return pointers (file path + match summary)
+        # instead of full chunks, letting the caller decide what to read
         remaining = limit - len(results)
         if remaining > 0 and narrative_config.fallback_to_vector:
             vector_results = self.search(query=query, limit=remaining, **vector_kwargs)
@@ -431,6 +476,7 @@ class RagtimeDB:
             for r in vector_results:
                 if r["metadata"].get("file") not in narrative_files:
                     r["retrieval_method"] = "vector"
+                    r["content"] = _vector_summary(r)
                     results.append(r)
                     if len(results) >= limit:
                         break
