@@ -248,15 +248,47 @@ def update_manifest(
 
         merged.append(entry)
 
-    # Write manifest
+    # Write manifest grouped by directory section
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     lines = ["# Narrative Index", ""]
+
+    # Group entries by their top-level directory path
+    groups: dict[str, list[ManifestEntry]] = {}
     for entry in merged:
-        lines.append(entry.to_line())
+        section = _section_for_path(entry.file_path)
+        groups.setdefault(section, []).append(entry)
+
+    for section, entries_in_group in groups.items():
+        lines.append(f"## {section}")
+        lines.append("")
+        for entry in entries_in_group:
+            lines.append(entry.to_line())
+        lines.append("")
 
     manifest_path.write_text("\n".join(lines) + "\n")
 
     return len(merged)
+
+
+def _section_for_path(file_path: str) -> str:
+    """Derive a human-readable section name from a file path.
+
+    .ragtime/app/auth/foo.md  → "app/auth"
+    .ragtime/app/foo.md       → "app"
+    .ragtime/team/foo.md      → "team"
+    docs/api/foo.md           → "docs/api"
+    docs/foo.md               → "docs"
+    """
+    parts = file_path.replace("\\", "/").split("/")
+
+    # Strip leading .ragtime/ prefix
+    if parts and parts[0] == ".ragtime":
+        parts = parts[1:]
+
+    # Use directory path (everything except the filename)
+    if len(parts) > 1:
+        return "/".join(parts[:-1])
+    return parts[0] if parts else "other"
 
 
 # --- Query matching ---
