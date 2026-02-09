@@ -735,6 +735,11 @@ def index(path: Path, index_type: str, clear: bool):
     # Get current branch for tagging ephemeral entries
     current_branch = get_current_branch(path)
 
+    # Update narrative manifest if enabled (always, regardless of changed files)
+    if config.narrative.enabled:
+        count = update_manifest(path, config.narrative.index_file, config.docs.paths)
+        click.echo(f"Narrative index: {count} entries")
+
     # Get files changed from main - only these get indexed as ephemeral
     changed_files = get_changed_files_from_main(path)
     if not changed_files:
@@ -805,10 +810,6 @@ def index(path: Path, index_type: str, clear: bool):
         branches = ", ".join(f"{b}: {c}" for b, c in ephemeral['by_branch'].items())
         click.echo(f"  Ephemeral by branch: {branches}")
 
-    # Update narrative manifest if enabled
-    if config.narrative.enabled:
-        count = update_manifest(path, config.narrative.index_file, config.docs.paths)
-        click.echo(f"  Narrative index: {count} entries")
 
 
 @main.command()
@@ -2819,7 +2820,7 @@ def narrative():
 @click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
 def narrative_rebuild(path: Path):
     """Force full rebuild of the narrative manifest index."""
-    path = Path(path).resolve()
+    path = get_main_repo_path(Path(path).resolve())
     config = RagtimeConfig.load(path)
 
     count = update_manifest(path, config.narrative.index_file, config.docs.paths)
@@ -2831,7 +2832,7 @@ def narrative_rebuild(path: Path):
 @click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
 def narrative_show(path: Path):
     """Show the current narrative manifest index."""
-    path = Path(path).resolve()
+    path = get_main_repo_path(Path(path).resolve())
     config = RagtimeConfig.load(path)
 
     manifest_path = path / config.narrative.index_file
@@ -2857,7 +2858,7 @@ def narrative_show(path: Path):
 @click.option("--path", type=click.Path(exists=True, path_type=Path), default=".")
 def narrative_match(query: str, path: Path):
     """Debug: show which manifest entries match a query and why."""
-    path = Path(path).resolve()
+    path = get_main_repo_path(Path(path).resolve())
     config = RagtimeConfig.load(path)
 
     manifest_path = path / config.narrative.index_file
