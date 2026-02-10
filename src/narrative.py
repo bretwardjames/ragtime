@@ -72,23 +72,26 @@ def generate_manifest(project_path: Path, doc_paths: list[str] | None = None) ->
         List of auto-generated ManifestEntry objects
     """
     entries = []
+    seen: set[str] = set()
     ragtime_dir = project_path / ".ragtime"
+
+    def _add(md_file: Path):
+        entry = _entry_from_file(md_file, project_path)
+        if entry and entry.file_path not in seen:
+            seen.add(entry.file_path)
+            entries.append(entry)
 
     # Scan .ragtime/app/ for memories
     app_dir = ragtime_dir / "app"
     if app_dir.exists():
         for md_file in sorted(app_dir.rglob("*.md")):
-            entry = _entry_from_file(md_file, project_path)
-            if entry:
-                entries.append(entry)
+            _add(md_file)
 
     # Scan .ragtime/team/ for team knowledge
     team_dir = ragtime_dir / "team"
     if team_dir.exists():
         for md_file in sorted(team_dir.rglob("*.md")):
-            entry = _entry_from_file(md_file, project_path)
-            if entry:
-                entries.append(entry)
+            _add(md_file)
 
     # Scan configured doc paths
     for doc_path_str in (doc_paths or []):
@@ -96,9 +99,7 @@ def generate_manifest(project_path: Path, doc_paths: list[str] | None = None) ->
         if not doc_dir.exists():
             continue
         for md_file in sorted(doc_dir.rglob("*.md")):
-            entry = _entry_from_file(md_file, project_path)
-            if entry:
-                entries.append(entry)
+            _add(md_file)
 
     return entries
 
